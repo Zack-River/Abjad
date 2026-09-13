@@ -1,9 +1,6 @@
 appId: com.zackriver.abjad
 productName: Abjad
-publisherName: Abdallah Wageeh
 copyright: Copyright © 2026 Abdallah Wageeh
-fileDescription: Abjad Arabic Calligraphy Studio
-legalCompanyName: Zack River
 directories:
   buildResources: build
 files:
@@ -13,6 +10,7 @@ files:
   - '!{.eslintcache,eslint.config.mjs,.prettierignore,.prettierrc.yaml,dev-app-update.yml,CHANGELOG.md,README.md}'
   - '!{.env,.env.*,.npmrc,pnpm-lock.yaml}'
   - '!{tsconfig.json,tsconfig.node.json,tsconfig.web.json}'
+  - '!scratch/**'
 asarUnpack:
   - resources/**
   - node_modules/ffmpeg-static/ffmpeg*
@@ -29,10 +27,10 @@ mac:
     CFBundleDisplayName: Abjad
     CFBundleName: Abjad
     NSHumanReadableCopyright: Copyright © 2026 Abdallah Wageeh
-    - NSCameraUsageDescription: Application requests access to the device's camera.
-    - NSMicrophoneUsageDescription: Application requests access to the device's microphone.
-    - NSDocumentsFolderUsageDescription: Application requests access to the user's Documents folder.
-    - NSDownloadsFolderUsageDescription: Application requests access to the user's Downloads folder.
+    NSCameraUsageDescription: Application requests access to the device's camera.
+    NSMicrophoneUsageDescription: Application requests access to the device's microphone.
+    NSDocumentsFolderUsageDescription: Application requests access to the user's Documents folder.
+    NSDownloadsFolderUsageDescription: Application requests access to the user's Downloads folder.
   notarize: false
 dmg:
   artifactName: ${name}-${version}.${ext}
