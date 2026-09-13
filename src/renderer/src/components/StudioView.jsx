@@ -162,11 +162,17 @@ async function recordAnimation(renderFrame, durationMs, fps, width, height, onPr
   const canvas = document.createElement('canvas')
   canvas.width = width
   canvas.height = height
-  const stream = canvas.captureStream(fps)
+  // Request frames explicitly after each canonical SVG frame is painted. This
+  // prevents Chromium from dropping animation frames while SVG rasterization
+  // is still yielding control to the renderer.
+  const stream = canvas.captureStream(0)
   const mimeType = MediaRecorder.isTypeSupported('video/webm;codecs=vp9')
     ? 'video/webm;codecs=vp9'
     : 'video/webm'
-  const recorder = new MediaRecorder(stream, { mimeType })
+  const recorder = new MediaRecorder(stream, {
+    mimeType,
+    videoBitsPerSecond: Math.max(4_000_000, Math.round(width * height * fps * 0.12))
+  })
   const chunks = []
   recorder.ondataavailable = (event) => {
     if (event.data.size > 0) chunks.push(event.data)
@@ -196,6 +202,7 @@ async function recordAnimation(renderFrame, durationMs, fps, width, height, onPr
     const frame = await renderFrame(progressMs)
     context.clearRect(0, 0, canvas.width, canvas.height)
     context.drawImage(frame, 0, 0)
+    stream.getVideoTracks()[0]?.requestFrame?.()
     onProgress?.((index + 1) / frameCount)
     await wait(1000 / fps)
   }
