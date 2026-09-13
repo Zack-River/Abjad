@@ -1,5 +1,4 @@
-diff --git a/node_modules/harfbuzzjs/dist/index.mjs b/node_modules/harfbuzzjs/dist/index.mjs
-index e3e6cb8..7dc3d5a 100644
+patch-package
 --- a/node_modules/harfbuzzjs/dist/index.mjs
 +++ b/node_modules/harfbuzzjs/dist/index.mjs
 @@ -2319,7 +2319,7 @@ function otTagToLanguage(tag) {
