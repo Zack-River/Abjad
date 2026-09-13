@@ -1,0 +1,20 @@
+{
+  "timestamp": "2026-09-11T11:42:29.485Z",
+  "totalConverted": 31,
+  "cleanedMicroSpurs": [],
+  "knownFailures": [
+    {
+      "char": "ج",
+      "reason": "Dot assigned priority 0 inside belly and drawn before body; body fractured"
+    },
+    {
+      "char": "ح",
+      "reason": "Body fractured into disconnected fragments with incorrect stroke direction"
+    },
+    {
+      "char": "خ",
+      "reason": "Body fractured into disconnected fragments with incorrect stroke direction"
+    }
+  ],
+  "warnings": []
+}

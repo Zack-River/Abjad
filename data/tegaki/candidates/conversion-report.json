@@ -1,0 +1,104 @@
+{
+  "generatedAt": "2026-09-11T22:28:40.389Z",
+  "generator": "tegaki-adapter",
+  "stats": {
+    "totalEntries": 72,
+    "verifiedCount": 72,
+    "needsReviewCount": 0,
+    "rejectedCount": 0,
+    "incompleteCount": 0,
+    "animatedCount": 72,
+    "totalStrokes": 306,
+    "removedSpursCount": 0
+  },
+  "cleanupLog": {
+    "isolated": {},
+    "contextual": [
+      {
+        "gid": 15,
+        "removed": [
+          {
+            "reason": "micro-spur",
+            "originalOrder": 1,
+            "length": 20.53
+          }
+        ]
+      },
+      {
+        "gid": 15,
+        "removed": [
+          {
+            "reason": "micro-spur",
+            "originalOrder": 1,
+            "length": 20.53
+          }
+        ]
+      },
+      {
+        "gid": 15,
+        "removed": [
+          {
+            "reason": "micro-spur",
+            "originalOrder": 1,
+            "length": 20.53
+          }
+        ]
+      },
+      {
+        "gid": 49,
+        "removed": [
+          {
+            "reason": "micro-spur",
+            "originalOrder": 3,
+            "length": 0
+          }
+        ]
+      },
+      {
+        "gid": 15,
+        "removed": [
+          {
+            "reason": "micro-spur",
+            "originalOrder": 1,
+            "length": 20.53
+          }
+        ]
+      },
+      {
+        "gid": 49,
+        "removed": [
+          {
+            "reason": "micro-spur",
+            "originalOrder": 3,
+            "length": 0
+          }
+        ]
+      }
+    ],
+    "diacritics": [],
+    "special": [],
+    "extended": [
+      {
+        "gid": 377,
+        "removed": [
+          {
+            "reason": "micro-spur",
+            "originalOrder": 1,
+            "length": 0
+          }
+        ]
+      },
+      {
+        "gid": 26,
+        "removed": [
+          {
+            "reason": "micro-spur",
+            "originalOrder": 2,
+            "length": 0
+          }
+        ]
+      }
+    ]
+  },
+  "knownFailures": []
+}

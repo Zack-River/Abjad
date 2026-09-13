@@ -1,0 +1,11 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="-50 -800 850 1100" width="800" height="600">
+  <rect x="-50" y="-800" width="850" height="1100" fill="#1e1e2e"/>
+  <line x1="-50" y1="0" x2="850" y2="0" stroke="#45475a" stroke-dasharray="4,4" stroke-width="2"/>
+  <line x1="-50" y1="-36" x2="850" y2="-36" stroke="#89b4fa" stroke-dasharray="4,4" stroke-width="2"/>
+  <!-- Outline of uni062D.medi -->
+  <path d="M637 5Q595 5 560.0 -0.5Q525 -6 497.0 -21.0Q469 -36 450.0 -64.5Q431 -93 421 -140L480 -175Q493 -135 512.0 -114.0Q531 -93 563.5 -85.0Q596 -77 647 -77Q668 -77 677.5 -65.5Q687 -54 687 -38Q687 -22 673.0 -8.5Q659 5 637 5ZM0 5 9 -77Q61 -77 111.0 -85.0Q161 -93 209.0 -108.0Q257 -123 301.5 -144.5Q346 -166 386 -194Q360 -217 326.0 -234.0Q292 -251 251.5 -260.5Q211 -270 166 -270Q150 -270 136.0 -269.0Q122 -268 108.0 -265.5Q94 -263 76 -259L60 -335Q87 -343 114.0 -347.5Q141 -352 166 -352Q218 -352 260.0 -339.5Q302 -327 336.5 -309.0Q371 -291 401.5 -273.0Q432 -255 461.0 -242.5Q490 -230 521 -230H542L549 -158Q506 -158 470.0 -146.0Q434 -134 399.5 -115.5Q365 -97 327.0 -76.5Q289 -56 243.0 -37.5Q197 -19 137.5 -7.0Q78 5 0 5Z" fill="#313244" stroke="#cdd6f4" stroke-width="3"/>
+  <!-- Stroke 0: entrance to eyebrow -->
+  <path d="M 637 -36 L 560 -36 C 500 -40, 440 -90, 440 -160 C 470 -200, 520 -200, 520 -200 C 480 -230, 400 -270, 320 -290 C 220 -315, 140 -320, 70 -300" fill="none" stroke="#f38ba8" stroke-width="36" stroke-linecap="round" stroke-linejoin="round" opacity="0.75"/>
+  <!-- Stroke 1: fold back to baseline exit -->
+  <path d="M 420 -210 C 370 -160, 300 -100, 240 -60 C 180 -40, 100 -36, 0 -36" fill="none" stroke="#a6e3a1" stroke-width="36" stroke-linecap="round" stroke-linejoin="round" opacity="0.75"/>
+</svg>

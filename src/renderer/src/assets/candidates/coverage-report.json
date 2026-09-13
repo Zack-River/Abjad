@@ -1,0 +1,564 @@
+{
+  "generatedAt": "2026-09-12T10:57:07.084Z",
+  "summary": {
+    "total": 144,
+    "verified": 58,
+    "needsReview": 0,
+    "incomplete": 59,
+    "rejected": 0,
+    "unsupported": 27
+  },
+  "letters": [
+    {
+      "char": "ا",
+      "name": "Alif",
+      "unicode": "U+0627",
+      "joiningType": "right",
+      "forms": {
+        "isolated": "verified",
+        "initial": "unsupported",
+        "medial": "unsupported",
+        "final": "verified"
+      }
+    },
+    {
+      "char": "ب",
+      "name": "Baa",
+      "unicode": "U+0628",
+      "joiningType": "dual",
+      "forms": {
+        "isolated": "verified",
+        "initial": "verified",
+        "medial": "verified",
+        "final": "verified"
+      }
+    },
+    {
+      "char": "ت",
+      "name": "Taa",
+      "unicode": "U+062A",
+      "joiningType": "dual",
+      "forms": {
+        "isolated": "verified",
+        "initial": "verified",
+        "medial": "verified",
+        "final": "incomplete"
+      }
+    },
+    {
+      "char": "ث",
+      "name": "Thaa",
+      "unicode": "U+062B",
+      "joiningType": "dual",
+      "forms": {
+        "isolated": "verified",
+        "initial": "incomplete",
+        "medial": "incomplete",
+        "final": "verified"
+      }
+    },
+    {
+      "char": "ج",
+      "name": "Jeem",
+      "unicode": "U+062C",
+      "joiningType": "dual",
+      "forms": {
+        "isolated": "verified",
+        "initial": "incomplete",
+        "medial": "incomplete",
+        "final": "incomplete"
+      }
+    },
+    {
+      "char": "ح",
+      "name": "Haa",
+      "unicode": "U+062D",
+      "joiningType": "dual",
+      "forms": {
+        "isolated": "verified",
+        "initial": "incomplete",
+        "medial": "incomplete",
+        "final": "incomplete"
+      }
+    },
+    {
+      "char": "خ",
+      "name": "Khaa",
+      "unicode": "U+062E",
+      "joiningType": "dual",
+      "forms": {
+        "isolated": "verified",
+        "initial": "incomplete",
+        "medial": "incomplete",
+        "final": "incomplete"
+      }
+    },
+    {
+      "char": "د",
+      "name": "Daal",
+      "unicode": "U+062F",
+      "joiningType": "right",
+      "forms": {
+        "isolated": "verified",
+        "initial": "unsupported",
+        "medial": "unsupported",
+        "final": "verified"
+      }
+    },
+    {
+      "char": "ذ",
+      "name": "Dhaal",
+      "unicode": "U+0630",
+      "joiningType": "right",
+      "forms": {
+        "isolated": "verified",
+        "initial": "unsupported",
+        "medial": "unsupported",
+        "final": "incomplete"
+      }
+    },
+    {
+      "char": "ر",
+      "name": "Raa",
+      "unicode": "U+0631",
+      "joiningType": "right",
+      "forms": {
+        "isolated": "verified",
+        "initial": "unsupported",
+        "medial": "unsupported",
+        "final": "verified"
+      }
+    },
+    {
+      "char": "ز",
+      "name": "Zaay",
+      "unicode": "U+0632",
+      "joiningType": "right",
+      "forms": {
+        "isolated": "verified",
+        "initial": "unsupported",
+        "medial": "unsupported",
+        "final": "incomplete"
+      }
+    },
+    {
+      "char": "س",
+      "name": "Seen",
+      "unicode": "U+0633",
+      "joiningType": "dual",
+      "forms": {
+        "isolated": "verified",
+        "initial": "verified",
+        "medial": "incomplete",
+        "final": "incomplete"
+      }
+    },
+    {
+      "char": "ش",
+      "name": "Sheen",
+      "unicode": "U+0634",
+      "joiningType": "dual",
+      "forms": {
+        "isolated": "verified",
+        "initial": "incomplete",
+        "medial": "incomplete",
+        "final": "incomplete"
+      }
+    },
+    {
+      "char": "ص",
+      "name": "Saad",
+      "unicode": "U+0635",
+      "joiningType": "dual",
+      "forms": {
+        "isolated": "verified",
+        "initial": "incomplete",
+        "medial": "incomplete",
+        "final": "incomplete"
+      }
+    },
+    {
+      "char": "ض",
+      "name": "Daad",
+      "unicode": "U+0636",
+      "joiningType": "dual",
+      "forms": {
+        "isolated": "verified",
+        "initial": "incomplete",
+        "medial": "incomplete",
+        "final": "incomplete"
+      }
+    },
+    {
+      "char": "ط",
+      "name": "Taa_heavy",
+      "unicode": "U+0637",
+      "joiningType": "dual",
+      "forms": {
+        "isolated": "verified",
+        "initial": "incomplete",
+        "medial": "incomplete",
+        "final": "incomplete"
+      }
+    },
+    {
+      "char": "ظ",
+      "name": "Zaa_heavy",
+      "unicode": "U+0638",
+      "joiningType": "dual",
+      "forms": {
+        "isolated": "verified",
+        "initial": "incomplete",
+        "medial": "incomplete",
+        "final": "incomplete"
+      }
+    },
+    {
+      "char": "ع",
+      "name": "Ayn",
+      "unicode": "U+0639",
+      "joiningType": "dual",
+      "forms": {
+        "isolated": "verified",
+        "initial": "verified",
+        "medial": "incomplete",
+        "final": "incomplete"
+      }
+    },
+    {
+      "char": "غ",
+      "name": "Ghayn",
+      "unicode": "U+063A",
+      "joiningType": "dual",
+      "forms": {
+        "isolated": "verified",
+        "initial": "incomplete",
+        "medial": "incomplete",
+        "final": "incomplete"
+      }
+    },
+    {
+      "char": "ف",
+      "name": "Faa",
+      "unicode": "U+0641",
+      "joiningType": "dual",
+      "forms": {
+        "isolated": "verified",
+        "initial": "verified",
+        "medial": "incomplete",
+        "final": "incomplete"
+      }
+    },
+    {
+      "char": "ق",
+      "name": "Qaaf",
+      "unicode": "U+0642",
+      "joiningType": "dual",
+      "forms": {
+        "isolated": "verified",
+        "initial": "incomplete",
+        "medial": "incomplete",
+        "final": "incomplete"
+      }
+    },
+    {
+      "char": "ك",
+      "name": "Kaaf",
+      "unicode": "U+0643",
+      "joiningType": "dual",
+      "forms": {
+        "isolated": "verified",
+        "initial": "verified",
+        "medial": "incomplete",
+        "final": "incomplete"
+      }
+    },
+    {
+      "char": "ل",
+      "name": "Laam",
+      "unicode": "U+0644",
+      "joiningType": "dual",
+      "forms": {
+        "isolated": "verified",
+        "initial": "incomplete",
+        "medial": "verified",
+        "final": "incomplete"
+      }
+    },
+    {
+      "char": "م",
+      "name": "Meem",
+      "unicode": "U+0645",
+      "joiningType": "dual",
+      "forms": {
+        "isolated": "verified",
+        "initial": "verified",
+        "medial": "incomplete",
+        "final": "verified"
+      }
+    },
+    {
+      "char": "ن",
+      "name": "Noon",
+      "unicode": "U+0646",
+      "joiningType": "dual",
+      "forms": {
+        "isolated": "verified",
+        "initial": "verified",
+        "medial": "verified",
+        "final": "incomplete"
+      }
+    },
+    {
+      "char": "ه",
+      "name": "Haa_light",
+      "unicode": "U+0647",
+      "joiningType": "dual",
+      "forms": {
+        "isolated": "verified",
+        "initial": "verified",
+        "medial": "incomplete",
+        "final": "incomplete"
+      }
+    },
+    {
+      "char": "و",
+      "name": "Waaw",
+      "unicode": "U+0648",
+      "joiningType": "right",
+      "forms": {
+        "isolated": "verified",
+        "initial": "unsupported",
+        "medial": "unsupported",
+        "final": "verified"
+      }
+    },
+    {
+      "char": "ي",
+      "name": "Yaa",
+      "unicode": "U+064A",
+      "joiningType": "dual",
+      "forms": {
+        "isolated": "verified",
+        "initial": "incomplete",
+        "medial": "incomplete",
+        "final": "incomplete"
+      }
+    },
+    {
+      "char": "ة",
+      "name": "Taa_marbutah",
+      "unicode": "U+0629",
+      "joiningType": "right",
+      "forms": {
+        "isolated": "verified",
+        "initial": "unsupported",
+        "medial": "unsupported",
+        "final": "verified"
+      }
+    },
+    {
+      "char": "ى",
+      "name": "Alif_maqsura",
+      "unicode": "U+0649",
+      "joiningType": "right",
+      "forms": {
+        "isolated": "verified",
+        "initial": "unsupported",
+        "medial": "unsupported",
+        "final": "verified"
+      }
+    },
+    {
+      "char": "ء",
+      "name": "Hamza_isolated",
+      "unicode": "U+0621",
+      "joiningType": "none",
+      "forms": {
+        "isolated": "verified",
+        "initial": "unsupported",
+        "medial": "unsupported",
+        "final": "unsupported"
+      }
+    },
+    {
+      "char": "أ",
+      "name": "Alif_hamza_above",
+      "unicode": "U+0623",
+      "joiningType": "right",
+      "forms": {
+        "isolated": "verified",
+        "initial": "unsupported",
+        "medial": "unsupported",
+        "final": "incomplete"
+      }
+    },
+    {
+      "char": "إ",
+      "name": "Alif_hamza_below",
+      "unicode": "U+0625",
+      "joiningType": "right",
+      "forms": {
+        "isolated": "verified",
+        "initial": "unsupported",
+        "medial": "unsupported",
+        "final": "incomplete"
+      }
+    },
+    {
+      "char": "آ",
+      "name": "Alif_maddah",
+      "unicode": "U+0622",
+      "joiningType": "right",
+      "forms": {
+        "isolated": "verified",
+        "initial": "unsupported",
+        "medial": "unsupported",
+        "final": "incomplete"
+      }
+    },
+    {
+      "char": "ؤ",
+      "name": "Waaw_hamza",
+      "unicode": "U+0624",
+      "joiningType": "right",
+      "forms": {
+        "isolated": "verified",
+        "initial": "unsupported",
+        "medial": "unsupported",
+        "final": "incomplete"
+      }
+    },
+    {
+      "char": "ئ",
+      "name": "Yaa_hamza",
+      "unicode": "U+0626",
+      "joiningType": "dual",
+      "forms": {
+        "isolated": "verified",
+        "initial": "incomplete",
+        "medial": "incomplete",
+        "final": "incomplete"
+      }
+    }
+  ],
+  "diacritics": [
+    {
+      "mark": "َ",
+      "name": "Fathah",
+      "status": "verified"
+    },
+    {
+      "mark": "ِ",
+      "name": "Kasrah",
+      "status": "verified"
+    },
+    {
+      "mark": "ُ",
+      "name": "Dammah",
+      "status": "verified"
+    },
+    {
+      "mark": "ْ",
+      "name": "Sukoon",
+      "status": "verified"
+    },
+    {
+      "mark": "ّ",
+      "name": "Shaddah",
+      "status": "verified"
+    },
+    {
+      "mark": "ً",
+      "name": "Tanween Fath",
+      "status": "verified"
+    },
+    {
+      "mark": "ٍ",
+      "name": "Tanween Kasr",
+      "status": "verified"
+    },
+    {
+      "mark": "ٌ",
+      "name": "Tanween Damm",
+      "status": "verified"
+    },
+    {
+      "mark": "ٰ",
+      "name": "Dagger Alif",
+      "status": "incomplete"
+    },
+    {
+      "mark": "ٓ",
+      "name": "Maddah",
+      "status": "incomplete"
+    },
+    {
+      "mark": "ـ",
+      "name": "Tatweel",
+      "status": "incomplete"
+    }
+  ],
+  "specialCompositions": [
+    {
+      "word": "لا",
+      "description": "Lam-Alif Isolated Ligature",
+      "status": "verified"
+    },
+    {
+      "word": "لأ",
+      "description": "Lam-Alif with Hamza Above",
+      "status": "verified"
+    },
+    {
+      "word": "لإ",
+      "description": "Lam-Alif with Hamza Below",
+      "status": "verified"
+    },
+    {
+      "word": "لآ",
+      "description": "Lam-Alif with Maddah",
+      "status": "verified"
+    },
+    {
+      "word": "لال",
+      "description": "Lam-Alif Medial Ligature",
+      "status": "verified"
+    },
+    {
+      "word": "للا",
+      "description": "Lam-Lam-Alif Ligature",
+      "status": "verified"
+    },
+    {
+      "word": "بِسْمِ",
+      "description": "Extended Word - Basmalah start",
+      "status": "verified"
+    },
+    {
+      "word": "مُحَمَّد",
+      "description": "Extended Word - Mohammad with Shaddah",
+      "status": "verified"
+    },
+    {
+      "word": "سؤال",
+      "description": "Extended Word - Hamza on Waw",
+      "status": "verified"
+    },
+    {
+      "word": "قراءة",
+      "description": "Extended Word - Hamza on line with Taa Marbutah",
+      "status": "verified"
+    },
+    {
+      "word": "مؤمن",
+      "description": "Extended Word - Waw Hamza in medial context",
+      "status": "verified"
+    },
+    {
+      "word": "بيئة",
+      "description": "Extended Word - Yaa Hamza in medial context",
+      "status": "verified"
+    }
+  ]
+}

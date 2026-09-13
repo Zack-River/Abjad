@@ -1,0 +1,224 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://arabic-stroke.org/schemas/arabic-strokes.schema.json",
+  "title": "ArabicStrokeDataset",
+  "description": "Production and Candidate schema for Arabic stroke datasets, defining glyph geometry, educational handwriting sequence, median paths, and animation timing.",
+  "type": "object",
+  "required": ["meta"],
+  "properties": {
+    "meta": {
+      "type": "object",
+      "required": ["schemaVersion", "coordinateSpace", "unitsPerEm"],
+      "properties": {
+        "schemaVersion": { "type": "string" },
+        "datasetVersion": { "type": "string" },
+        "language": { "type": "string" },
+        "script": { "type": "string" },
+        "coordinateSpace": { "type": "string" },
+        "coordinateSystem": { "type": "string" },
+        "unitsPerEm": { "type": "integer" },
+        "ascender": { "type": "number" },
+        "descender": { "type": "number" },
+        "fontFamily": { "type": "string" },
+        "fontVersion": { "type": "string" },
+        "fontSha256": { "type": "string" },
+        "generator": { "type": "string" },
+        "generatedAt": { "type": "string" }
+      }
+    },
+    "letters": {
+      "type": "array",
+      "items": { "$ref": "#/definitions/letterEntry" }
+    },
+    "contextual": {
+      "type": "array",
+      "items": { "$ref": "#/definitions/wordEntry" }
+    },
+    "diacritics": {
+      "type": "array",
+      "items": { "$ref": "#/definitions/wordEntry" }
+    },
+    "special": {
+      "type": "array",
+      "items": { "$ref": "#/definitions/wordEntry" }
+    },
+    "extended": {
+      "type": "array",
+      "items": { "$ref": "#/definitions/wordEntry" }
+    }
+  },
+  "definitions": {
+    "point2D": {
+      "type": "object",
+      "required": ["x", "y"],
+      "properties": {
+        "x": { "type": "number" },
+        "y": { "type": "number" },
+        "anchor": { "type": "string" },
+        "semanticAnchor": { "type": "string" }
+      }
+    },
+    "validationMetadata": {
+      "type": "object",
+      "required": ["status"],
+      "properties": {
+        "status": {
+          "type": "string",
+          "enum": ["verified", "needs-review", "rejected", "incomplete"]
+        },
+        "notes": { "type": "string" }
+      }
+    },
+    "animationMetadata": {
+      "type": "object",
+      "required": ["capability"],
+      "properties": {
+        "capability": {
+          "type": "string",
+          "enum": ["animated", "static-only", "unsupported"]
+        },
+        "notes": { "type": "string" }
+      }
+    },
+    "sourceMetadata": {
+      "type": "object",
+      "required": ["generator"],
+      "properties": {
+        "generator": { "type": "string" },
+        "font": { "type": "string" },
+        "fontVersion": { "type": "string" },
+        "fontSha256": { "type": "string" },
+        "reviewed": { "type": "boolean" },
+        "reviewedBy": { "type": "string" },
+        "reviewedAt": { "type": "string" }
+      }
+    },
+    "pointWithWidth": {
+      "type": "object",
+      "required": ["x", "y"],
+      "properties": {
+        "x": { "type": "number" },
+        "y": { "type": "number" },
+        "t": { "type": "number" },
+        "width": { "type": "number" }
+      }
+    },
+    "strokeItem": {
+      "type": "object",
+      "required": ["order", "medianPath", "direction"],
+      "properties": {
+        "order": { "type": "integer", "minimum": 0 },
+        "originalOrder": { "type": "integer" },
+        "priority": { "type": "integer" },
+        "type": {
+          "type": "string",
+          "enum": ["main_body", "dot", "mark", "connector", "accent", "unknown"]
+        },
+        "isCandidateDot": { "type": "boolean" },
+        "direction": { "type": "string" },
+        "length": { "type": "number" },
+        "durationMs": { "type": "number" },
+        "delayMs": { "type": "number" },
+        "startPoint": {
+          "anyOf": [{ "$ref": "#/definitions/point2D" }, { "type": "null" }]
+        },
+        "endPoint": {
+          "anyOf": [{ "$ref": "#/definitions/point2D" }, { "type": "null" }]
+        },
+        "medianPath": { "type": "string" },
+        "outlinePath": { "type": "string" },
+        "points": {
+          "type": "array",
+          "items": {
+            "type": "array",
+            "items": { "type": "number" },
+            "minItems": 2,
+            "maxItems": 2
+          }
+        },
+        "pointsWithWidth": {
+          "type": "array",
+          "items": { "$ref": "#/definitions/pointWithWidth" }
+        }
+      }
+    },
+    "cleanupMetadata": {
+      "type": "object",
+      "properties": {
+        "removedSegments": { "type": "array" }
+      }
+    },
+    "letterEntry": {
+      "type": "object",
+      "required": ["id", "char", "strokes", "validation", "animation", "source"],
+      "properties": {
+        "id": { "type": "string" },
+        "char": { "type": "string" },
+        "unicode": { "type": "integer" },
+        "form": {
+          "type": "string",
+          "enum": ["isolated", "initial", "medial", "final"]
+        },
+        "advanceWidth": { "type": "number" },
+        "boundingBox": {
+          "type": "object",
+          "properties": {
+            "x1": { "type": "number" },
+            "y1": { "type": "number" },
+            "x2": { "type": "number" },
+            "y2": { "type": "number" }
+          }
+        },
+        "outlinePath": { "type": "string" },
+        "validation": { "$ref": "#/definitions/validationMetadata" },
+        "animation": { "$ref": "#/definitions/animationMetadata" },
+        "source": { "$ref": "#/definitions/sourceMetadata" },
+        "cleanup": { "$ref": "#/definitions/cleanupMetadata" },
+        "strokes": {
+          "type": "array",
+          "items": { "$ref": "#/definitions/strokeItem" }
+        }
+      }
+    },
+    "glyphInstance": {
+      "type": "object",
+      "required": ["glyphId", "cluster"],
+      "properties": {
+        "glyphId": { "type": "integer" },
+        "cluster": { "type": "integer" },
+        "xAdvance": { "type": "number" },
+        "yAdvance": { "type": "number" },
+        "xOffset": { "type": "number" },
+        "yOffset": { "type": "number" },
+        "xPosition": { "type": "number" },
+        "yPosition": { "type": "number" },
+        "char": { "type": "string" },
+        "outlinePath": { "type": ["string", "null"] },
+        "validation": { "$ref": "#/definitions/validationMetadata" },
+        "animation": { "$ref": "#/definitions/animationMetadata" },
+        "source": { "$ref": "#/definitions/sourceMetadata" },
+        "strokes": {
+          "type": "array",
+          "items": { "$ref": "#/definitions/strokeItem" }
+        }
+      }
+    },
+    "wordEntry": {
+      "type": "object",
+      "required": ["id", "word", "glyphCount", "glyphs", "validation", "animation", "source"],
+      "properties": {
+        "id": { "type": "string" },
+        "word": { "type": "string" },
+        "glyphCount": { "type": "integer" },
+        "validation": { "$ref": "#/definitions/validationMetadata" },
+        "animation": { "$ref": "#/definitions/animationMetadata" },
+        "source": { "$ref": "#/definitions/sourceMetadata" },
+        "cleanup": { "$ref": "#/definitions/cleanupMetadata" },
+        "glyphs": {
+          "type": "array",
+          "items": { "$ref": "#/definitions/glyphInstance" }
+        }
+      }
+    }
+  }
+}

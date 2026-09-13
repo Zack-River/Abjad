@@ -1,0 +1,192 @@
+{
+  "ب": [
+    {
+      "glyphId": 100,
+      "cluster": 0,
+      "xAdvance": 993,
+      "yAdvance": 0,
+      "xOffset": 0,
+      "yOffset": 0
+    }
+  ],
+  "ببب": [
+    {
+      "glyphId": 101,
+      "cluster": 2,
+      "xAdvance": 1093,
+      "yAdvance": 0,
+      "xOffset": 0,
+      "yOffset": 0
+    },
+    {
+      "glyphId": 104,
+      "cluster": 1,
+      "xAdvance": 343,
+      "yAdvance": 0,
+      "xOffset": 0,
+      "yOffset": 0
+    },
+    {
+      "glyphId": 102,
+      "cluster": 0,
+      "xAdvance": 269,
+      "yAdvance": 0,
+      "xOffset": 0,
+      "yOffset": 0
+    }
+  ],
+  "باب": [
+    {
+      "glyphId": 100,
+      "cluster": 2,
+      "xAdvance": 993,
+      "yAdvance": 0,
+      "xOffset": 0,
+      "yOffset": 0
+    },
+    {
+      "glyphId": 47,
+      "cluster": 1,
+      "xAdvance": 291,
+      "yAdvance": 0,
+      "xOffset": 0,
+      "yOffset": 0
+    },
+    {
+      "glyphId": 102,
+      "cluster": 0,
+      "xAdvance": 269,
+      "yAdvance": 0,
+      "xOffset": 0,
+      "yOffset": 0
+    }
+  ],
+  "بتث": [
+    {
+      "glyphId": 1344,
+      "cluster": 2,
+      "xAdvance": 1093,
+      "yAdvance": 0,
+      "xOffset": 0,
+      "yOffset": 0
+    },
+    {
+      "glyphId": 1280,
+      "cluster": 1,
+      "xAdvance": 373,
+      "yAdvance": 0,
+      "xOffset": 0,
+      "yOffset": 0
+    },
+    {
+      "glyphId": 102,
+      "cluster": 0,
+      "xAdvance": 269,
+      "yAdvance": 0,
+      "xOffset": 0,
+      "yOffset": 0
+    }
+  ],
+  "لا": [
+    {
+      "glyphId": 704,
+      "cluster": 0,
+      "xAdvance": 582,
+      "yAdvance": 0,
+      "xOffset": 0,
+      "yOffset": 0
+    }
+  ],
+  "بِسْمِ": [
+    {
+      "glyphId": 609,
+      "cluster": 4,
+      "xAdvance": 0,
+      "yAdvance": 0,
+      "xOffset": 139,
+      "yOffset": 0
+    },
+    {
+      "glyphId": 771,
+      "cluster": 4,
+      "xAdvance": 562,
+      "yAdvance": 0,
+      "xOffset": 0,
+      "yOffset": 0
+    },
+    {
+      "glyphId": 1228,
+      "cluster": 2,
+      "xAdvance": 0,
+      "yAdvance": 0,
+      "xOffset": 301,
+      "yOffset": -126
+    },
+    {
+      "glyphId": 1085,
+      "cluster": 2,
+      "xAdvance": 850,
+      "yAdvance": 0,
+      "xOffset": 0,
+      "yOffset": 0
+    },
+    {
+      "glyphId": 609,
+      "cluster": 0,
+      "xAdvance": 0,
+      "yAdvance": 0,
+      "xOffset": -35,
+      "yOffset": -191
+    },
+    {
+      "glyphId": 102,
+      "cluster": 0,
+      "xAdvance": 269,
+      "yAdvance": 0,
+      "xOffset": 0,
+      "yOffset": 0
+    }
+  ],
+  "السلام": [
+    {
+      "glyphId": 770,
+      "cluster": 5,
+      "xAdvance": 484,
+      "yAdvance": 0,
+      "xOffset": 0,
+      "yOffset": 0
+    },
+    {
+      "glyphId": 705,
+      "cluster": 3,
+      "xAdvance": 599,
+      "yAdvance": 0,
+      "xOffset": 0,
+      "yOffset": 0
+    },
+    {
+      "glyphId": 1085,
+      "cluster": 2,
+      "xAdvance": 850,
+      "yAdvance": 0,
+      "xOffset": 0,
+      "yOffset": 0
+    },
+    {
+      "glyphId": 668,
+      "cluster": 1,
+      "xAdvance": 260,
+      "yAdvance": 0,
+      "xOffset": 0,
+      "yOffset": 0
+    },
+    {
+      "glyphId": 46,
+      "cluster": 0,
+      "xAdvance": 238,
+      "yAdvance": 0,
+      "xOffset": 0,
+      "yOffset": 0
+    }
+  ]
+}
