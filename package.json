@@ -15,9 +15,9 @@
     "build": "npm run typecheck && electron-vite build",
     "postinstall": "sed -i \"s/init(await createHarfBuzz({ locateFile: () => '\\/harfbuzz.wasm' }));/init(await createHarfBuzz());/\" node_modules/harfbuzzjs/dist/index.mjs && electron-builder install-app-deps",
     "build:unpack": "npm run build && electron-builder --dir",
-    "build:win": "npm run build && electron-builder --win",
-    "build:mac": "electron-vite build && electron-builder --mac",
-    "build:linux": "electron-vite build && electron-builder --linux",
+    "build:win": "npm run build && electron-builder --win --publish never",
+    "build:mac": "electron-vite build && electron-builder --mac --publish never",
+    "build:linux": "electron-vite build && electron-builder --linux --publish never",
     "typecheck": "npm run typecheck:node && npm run typecheck:web"
   },
   "dependencies": {
