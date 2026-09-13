@@ -6,14 +6,14 @@ declare global {
     api: {
       loadFont: () => Promise<Uint8Array>
       getLicenseStatus: () => Promise<{
-        status: 'licensed' | 'required' | 'expired' | 'offline' | 'storage_unavailable'
+        status: 'licensed' | 'required' | 'expired' | 'device_bound' | 'offline' | 'storage_unavailable'
         licenseType?: 'trial_2h' | 'lifetime'
         expiresAt?: string | null
         remainingSeconds?: number | null
         message?: string
       }>
       activateLicense: (token: string) => Promise<{
-        status: 'licensed' | 'required' | 'expired' | 'offline' | 'storage_unavailable'
+        status: 'licensed' | 'required' | 'expired' | 'device_bound' | 'offline' | 'storage_unavailable'
         licenseType?: 'trial_2h' | 'lifetime'
         expiresAt?: string | null
         remainingSeconds?: number | null

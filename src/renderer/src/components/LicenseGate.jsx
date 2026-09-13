@@ -19,6 +19,8 @@ export default function LicenseGate({ status, onLicensed }) {
         setError('يجب الاتصال بخادم الترخيص للتحقق من المفتاح.')
       } else if (result.status === 'storage_unavailable') {
         setError('التخزين الآمن غير متاح. فعّل مدير مفاتيح النظام ثم أعد المحاولة.')
+      } else if (result.status === 'device_bound') {
+        setError('مفتاح الترخيص مرتبط بجهاز آخر.')
       } else {
         setError('مفتاح الترخيص غير صالح أو منتهي الصلاحية.')
       }
