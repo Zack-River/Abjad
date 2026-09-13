@@ -5,8 +5,24 @@ import { promises as fs } from 'fs'
 import { tmpdir } from 'os'
 import { spawn } from 'child_process'
 import { electronApp, optimizer, is } from '@electron-toolkit/utils'
+import bundledFfmpegPath from 'ffmpeg-static'
 import icon from '../../resources/icon.png?asset'
 import { activateLicense, getLicenseStatus } from './license'
+
+function resolveFfmpegPath(): string {
+  if (app.isPackaged) {
+    return join(
+      process.resourcesPath,
+      'app.asar.unpacked',
+      'node_modules',
+      'ffmpeg-static',
+      process.platform === 'win32' ? 'ffmpeg.exe' : 'ffmpeg'
+    )
+  }
+
+  if (!bundledFfmpegPath) throw new Error('Bundled FFmpeg executable is unavailable.')
+  return bundledFfmpegPath
+}
 
 function createWindow(): void {
   // Create the browser window.
@@ -131,7 +147,7 @@ function runFfmpeg(
         ]
 
   return new Promise((resolve, reject) => {
-    const process = spawn('ffmpeg', args)
+    const process = spawn(resolveFfmpegPath(), args)
     if (exportId) activeMediaProcesses.set(exportId, process)
     let stderr = ''
     let stdout = ''

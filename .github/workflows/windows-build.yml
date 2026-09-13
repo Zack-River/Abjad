@@ -28,6 +28,9 @@ jobs:
           $content = $content.Replace("init(await createHarfBuzz({ locateFile: () => '/harfbuzz.wasm' }));", "init(await createHarfBuzz());")
           Set-Content -Path $path -Value $content -NoNewline
 
+      - name: Download Windows FFmpeg binary
+        run: npm rebuild ffmpeg-static --foreground-scripts
+
       - name: Install native Electron dependencies
         run: npx electron-builder install-app-deps
 
