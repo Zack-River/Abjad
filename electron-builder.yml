@@ -1,5 +1,9 @@
 appId: com.zackriver.abjad
 productName: Abjad
+publisherName: Abdallah Wageeh
+copyright: Copyright © 2026 Abdallah Wageeh
+fileDescription: Abjad Arabic Calligraphy Studio
+legalCompanyName: Zack River
 directories:
   buildResources: build
 files:
@@ -15,13 +19,16 @@ asarUnpack:
 win:
   executableName: Abjad
 nsis:
-  artifactName: ${name}-${version}-setup.${ext}
+  artifactName: Abjad-${version}-setup.${ext}
   shortcutName: ${productName}
   uninstallDisplayName: ${productName}
   createDesktopShortcut: always
 mac:
   entitlementsInherit: build/entitlements.mac.plist
   extendInfo:
+    CFBundleDisplayName: Abjad
+    CFBundleName: Abjad
+    NSHumanReadableCopyright: Copyright © 2026 Abdallah Wageeh
     - NSCameraUsageDescription: Application requests access to the device's camera.
     - NSMicrophoneUsageDescription: Application requests access to the device's microphone.
     - NSDocumentsFolderUsageDescription: Application requests access to the user's Documents folder.
@@ -34,11 +41,8 @@ linux:
     - AppImage
     - snap
     - deb
-  maintainer: electronjs.org
+  maintainer: Abdallah Wageeh
   category: Utility
 appImage:
-  artifactName: ${name}-${version}.${ext}
+  artifactName: Abjad-${version}.${ext}
 npmRebuild: false
-publish:
-  provider: generic
-  url: https://example.com/auto-updates
