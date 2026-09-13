@@ -190,7 +190,7 @@ ipcMain.handle('convert-media', async (event, request: MediaConversionRequest) =
 
   const bytes =
     request.data instanceof ArrayBuffer ? Buffer.from(new Uint8Array(request.data)) : Buffer.from(request.data)
-  const basePath = join(tmpdir(), `arabic-stroke-${randomUUID()}`)
+  const basePath = join(tmpdir(), `abjad-${randomUUID()}`)
   const inputPath = `${basePath}.webm`
   const outputPath = `${basePath}.${request.format}`
 

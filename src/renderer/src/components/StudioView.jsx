@@ -291,7 +291,7 @@ function segmentArabicElements(value) {
 
 export default function StudioView() {
   // Input state
-  const [word, setWord] = useState('باب')
+  const [word, setWord] = useState('أبجد')
   const [elementType, setElementType] = useState('word') // 'letter' | 'word'
   const [drawMode, setDrawMode] = useState('stroke') // 'stroke' | 'connect'
   const [speed, setSpeed] = useState('medium') // 'slow' | 'medium' | 'fast'

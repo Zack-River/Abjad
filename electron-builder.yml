@@ -1,5 +1,5 @@
-appId: com.electron.app
-productName: arabic-stroke
+appId: com.zackriver.abjad
+productName: Abjad
 directories:
   buildResources: build
 files:
@@ -13,7 +13,7 @@ asarUnpack:
   - resources/**
   - node_modules/ffmpeg-static/ffmpeg*
 win:
-  executableName: arabic-stroke
+  executableName: Abjad
 nsis:
   artifactName: ${name}-${version}-setup.${ext}
   shortcutName: ${productName}
