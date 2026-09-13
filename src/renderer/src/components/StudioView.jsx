@@ -222,8 +222,8 @@ async function recordAnimation(renderFrame, durationMs, fps, width, height, onPr
 }
 
 const ANIMATED_EXPORT_SETTINGS = {
-  gif: { fps: 8, width: 640, height: 304, speed: 1 },
-  mp4: { fps: 12, width: 800, height: 380, speed: 1 }
+  gif: { fps: 15, width: 640, height: 304, speed: 1 },
+  mp4: { fps: 30, width: 800, height: 380, speed: 1 }
 }
 
 const EXPORT_RESOLUTIONS = [
