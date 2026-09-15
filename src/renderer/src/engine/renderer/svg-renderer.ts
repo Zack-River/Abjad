@@ -4,13 +4,28 @@ import {
   AnimationStep,
   CONNECTION_THRESHOLD_UNITS,
   getBridgeHandoffProgress,
-  getStepInkProgress
+  getStepInkProgress,
+  smoothProgress
 } from '../animation/animation-engine'
 import { StrokeItem } from '../data/stroke-registry'
 import { svgPathProperties } from 'svg-path-properties'
 
 function clamp(value: number): number {
   return Math.max(0, Math.min(1, value))
+}
+
+function translateSvgPath(path: string, deltaX: number, deltaY: number): string {
+  let coordinateIndex = 0
+  return path.replace(/([MLC])|(-?\d+(?:\.\d+)?)/g, (_token, command, number) => {
+    if (command) {
+      coordinateIndex = 0
+      return command
+    }
+    const value = Number(number)
+    const translated = value + (coordinateIndex % 2 === 0 ? deltaX : deltaY)
+    coordinateIndex += 1
+    return fmtNum(translated)
+  })
 }
 
 const DEFAULT_BODY_STAMP_SPACING = 2.8
@@ -23,6 +38,10 @@ export const GLOBAL_BRUSH_SCALE = 1
 export const DEFAULT_BRUSH_HEIGHT = 80
 export const DEFAULT_DOT_BRUSH_HEIGHT = 100
 export const BRUSH_WIDTH_TO_HEIGHT_RATIO = 0.3
+const HANDOFF_OVERLAP_SCALE = 1.12
+const MAX_HANDOFF_BRUSH_HEIGHT = 110
+const SHADOW_NORMALIZE_ERODE_RADIUS = 1.35
+const SHADOW_NORMALIZE_BLUR_RADIUS = 0.25
 const MAX_BODY_TANGENT_WINDOW = 0.014
 const MAX_DOT_TANGENT_WINDOW = 0.08
 const BODY_TANGENT_WINDOW_UNITS = 9
@@ -577,6 +596,12 @@ export interface PreparedConnection {
   nextOutlineId: string
   dx: number
   dy: number
+  mode: 'outgoing-mask' | 'handoff-mask'
+  bridgePath?: string
+  bridgeLength?: number
+  bridgeStartMs?: number
+  bridgeEndMs?: number
+  bridgeBrushHeight?: number
 }
 
 export interface PreparedGlyph {
@@ -602,6 +627,7 @@ export interface PreparedRenderScene {
   weightFilterRadius: number
   weightFilterId: string
   strokeWeightFilter: string
+  shadowFilterId: string
   defsOutlinesMarkup: string
   outlineMap: Map<string, string>
   glyphs: PreparedGlyph[]
@@ -666,6 +692,7 @@ export function prepareRenderScene(
   const weightDelta = strokeWeight - DEFAULT_STROKE_WEIGHT
   const weightFilterRadius = Math.min(2.5, Math.abs(weightDelta) * 0.25)
   const weightFilterId = `${idPrefix}stroke-weight`
+  const shadowFilterId = `${idPrefix}shadow-normalize`
   // The filter is attached to <use> elements inside the transformed word
   // group. A viewport-sized user-space filter can be evaluated before that
   // transform in Chromium and clip the entire glyph at non-default weights.
@@ -885,7 +912,6 @@ export function prepareRenderScene(
       // A clipped terminal path is used only to hand the cursor to the next
       // stroke. Its outgoing ink now completes against its own outline, so it
       // must not also mask-reveal the next glyph beyond that handoff point.
-      if (endProgress < 1) continue
       let endPt = endProgress < 1 ? undefined : connectingStroke.endPoint
       if (!endPt && connectingStroke.medianPath) {
         try {
@@ -897,10 +923,12 @@ export function prepareRenderScene(
       }
 
       let startPt = nextFirstStroke.startPoint
-      if (!startPt && nextFirstStroke.medianPath) {
+      if (nextFirstStroke.medianPath) {
         try {
           const p = new svgPathProperties(nextFirstStroke.medianPath)
-          startPt = p.getPointAtLength(0)
+          startPt = p.getPointAtLength(
+            p.getTotalLength() * (nextBodyStep.startProgress ?? 0)
+          )
         } catch {
           // ignore
         }
@@ -919,18 +947,57 @@ export function prepareRenderScene(
             (rawStrokes.indexOf(connectingStroke) >= 0
               ? rawStrokes.indexOf(connectingStroke)
               : rawStrokes.length - 1)
-          const connMaskId = `${idPrefix}mask-g${gIdx}-s${connStrokeOrder}`
+          const useHandoffMask =
+            endProgress < 1 && nextBodyStep.transition?.kind === 'bridge'
+          const connMaskId = useHandoffMask
+            ? `${idPrefix}handoff-g${gIdx}-to-${gIdx + 1}`
+            : `${idPrefix}mask-g${gIdx}-s${connStrokeOrder}`
           const nextOutlinePath = nextGlyph.definition?.outlinePath || ''
           if (nextOutlinePath) {
             const nextOutlineId = getOrAddOutline(nextOutlinePath)
             const dx = nextGlyph.glyphX - glyph.glyphX
             const dy = nextGlyph.glyphY - glyph.glyphY
+            const bridgePath = nextBodyStep.transition
+              ? translateSvgPath(nextBodyStep.transition.path, -glyph.glyphX, -glyph.glyphY)
+              : undefined
+            const bridgeLength = bridgePath
+              ? new svgPathProperties(bridgePath).getTotalLength()
+              : undefined
+            const bridgeBrushHeight = bridgePath
+              ? Math.min(
+                  MAX_HANDOFF_BRUSH_HEIGHT,
+                  Math.max(
+                    getBrushSquareGeometry(
+                      {
+                        brushProfile: connectingStroke.brushProfile as BrushProfile | undefined,
+                        isDot: false
+                      },
+                      0,
+                      strokeWeight
+                    ).height,
+                    getBrushSquareGeometry(
+                      {
+                        brushProfile: nextFirstStroke.brushProfile as BrushProfile | undefined,
+                        isDot: false
+                      },
+                      0,
+                      strokeWeight
+                    ).height
+                  ) * HANDOFF_OVERLAP_SCALE
+                )
+              : undefined
             connections.push({
               fromGlyphIndex: gIdx,
               connMaskId,
               nextOutlineId,
               dx,
-              dy
+              dy,
+              mode: useHandoffMask ? 'handoff-mask' : 'outgoing-mask',
+              bridgePath,
+              bridgeLength,
+              bridgeStartMs: nextBodyStep.transition?.startMs,
+              bridgeEndMs: nextBodyStep.transition?.endMs,
+              bridgeBrushHeight
             })
           }
         }
@@ -955,6 +1022,7 @@ export function prepareRenderScene(
     weightFilterRadius,
     weightFilterId,
     strokeWeightFilter,
+    shadowFilterId,
     defsOutlinesMarkup,
     outlineMap,
     glyphs,
@@ -968,7 +1036,7 @@ export function prepareRenderScene(
  * Runs in under a millisecond by reading precomputed Float32Array samples without path parsing.
  */
 export function renderSvgFrame(scene: PreparedRenderScene, progressMs: number = 0): string {
-  let defsContent = ''
+  let defsContent = `<filter id="${scene.shadowFilterId}" x="-100000" y="-100000" width="200000" height="200000" filterUnits="userSpaceOnUse" color-interpolation-filters="sRGB"><feMorphology operator="erode" radius="${SHADOW_NORMALIZE_ERODE_RADIUS}" in="SourceGraphic" result="shadow-eroded" /><feGaussianBlur in="shadow-eroded" stdDeviation="${SHADOW_NORMALIZE_BLUR_RADIUS}" /></filter>`
   let ghostLayerContent = ''
   let inkLayerContent = ''
   let medianLayerContent = ''
@@ -998,14 +1066,17 @@ export function renderSvgFrame(scene: PreparedRenderScene, progressMs: number = 
     const isDot = stroke.isDot
     const brushProfile = stroke.brushProfile
     const strokeWeight = scene.strokeWeight
+    const startProgress = clamp(stroke.step?.startProgress ?? 0)
+    const startLength = length * startProgress
 
     const progressClipPolygon = isDot
       ? getProgressClipPolygon(stroke.pathProps, length, progress)
       : null
+    const startCount = Math.min(stroke.fixedCount, Math.ceil(startLength / spacing))
     const activeCount = Math.min(stroke.fixedCount, Math.floor((length * progress) / spacing))
     let fragments = ''
 
-    for (let i = 0; i <= activeCount; i++) {
+    for (let i = startCount; i <= activeCount; i++) {
       const offset = i * 4
       const clampedProg = stroke.samples[offset]
       const px = stroke.samples[offset + 1]
@@ -1018,7 +1089,7 @@ export function renderSvgFrame(scene: PreparedRenderScene, progressMs: number = 
     }
 
     const lastFixed = Math.min(1, (activeCount * spacing) / length)
-    if (progress > lastFixed) {
+    if (progress > lastFixed && progress > startProgress) {
       const clampedProg = clamp(progress)
       const point = stroke.pathProps.getPointAtLength(length * clampedProg)
       const halfWin = tangentWindow(brushProfile, isDot, length)
@@ -1039,10 +1110,10 @@ export function renderSvgFrame(scene: PreparedRenderScene, progressMs: number = 
       fragments += `<rect x="${fmtNum(-width / 2)}" y="${fmtNum(-height / 2)}" width="${fmtNum(width)}" height="${fmtNum(height)}" transform="translate(${fmtNum(point.x)} ${fmtNum(point.y)}) rotate(${fmtNum(angle)})" />`
     }
 
-    if (stroke.continuousMask && progress > 0) {
+    if (stroke.continuousMask && progress > startProgress) {
       const { height: brushHeight } = getBrushSquareGeometry(stroke, progress, strokeWeight)
-      const dashLength = Math.max(length * progress, 0.001)
-      fragments += `<path class="continuous-mask-path" d="${stroke.medianPath}" fill="none" stroke="#fff" stroke-width="${fmtNum(brushHeight)}" stroke-linecap="butt" stroke-linejoin="round" stroke-dasharray="${dashLength} ${Math.max(length - dashLength, 0.001)}"></path>`
+      const dashLength = Math.max(length * (progress - startProgress), 0.001)
+      fragments += `<path class="continuous-mask-path" d="${stroke.medianPath}" fill="none" stroke="#fff" stroke-width="${fmtNum(brushHeight)}" stroke-linecap="butt" stroke-linejoin="round" stroke-dasharray="${dashLength} ${Math.max(length - dashLength, 0.001)}" stroke-dashoffset="${fmtNum(-startLength)}"></path>`
     }
 
     defsContent += `
@@ -1058,17 +1129,45 @@ export function renderSvgFrame(scene: PreparedRenderScene, progressMs: number = 
     `
   }
 
+  for (const connection of scene.connections) {
+    if (
+      !connection.bridgePath ||
+      !connection.bridgeLength ||
+      connection.bridgeStartMs === undefined ||
+      connection.bridgeEndMs === undefined
+    ) {
+      continue
+    }
+
+    const duration = connection.bridgeEndMs - connection.bridgeStartMs
+    const transitionProgress =
+      duration > 0
+        ? progressMs <= connection.bridgeStartMs
+          ? 0
+          : progressMs >= connection.bridgeEndMs
+            ? 1
+            : smoothProgress((progressMs - connection.bridgeStartMs) / duration)
+        : progressMs >= connection.bridgeEndMs
+          ? 1
+          : 0
+    const maskX = -10000
+    const maskY = -10000
+    const maskSize = 20000
+    const dashLength = Math.max(connection.bridgeLength * transitionProgress, 0.001)
+    defsContent += `<mask id="${connection.connMaskId}" maskUnits="userSpaceOnUse" maskContentUnits="userSpaceOnUse" x="${maskX}" y="${maskY}" width="${maskSize}" height="${maskSize}"><rect fill="#000" x="${maskX}" y="${maskY}" width="${maskSize}" height="${maskSize}" /><path class="connection-mask-path" d="${connection.bridgePath}" fill="none" stroke="#fff" stroke-width="${fmtNum(connection.bridgeBrushHeight || DEFAULT_BRUSH_HEIGHT)}" stroke-linecap="butt" stroke-linejoin="round" stroke-dasharray="${fmtNum(dashLength)} ${fmtNum(Math.max(connection.bridgeLength - dashLength, 0.001))}" /></mask>`
+  }
+
   for (const glyph of scene.glyphs) {
     if (!glyph.isSupported) {
       if (glyph.unsupportedOutlineId) {
-        ghostLayerContent += `<g class="glyph-ghost unsupported" data-glyph-id="${glyph.glyphId}" transform="${glyph.glyphTransform}"><use href="#${glyph.unsupportedOutlineId}" xlink:href="#${glyph.unsupportedOutlineId}" class="ghost-outline unsupported"${filterAttr} /></g>`
+        ghostLayerContent += `<g class="glyph-ghost unsupported" data-glyph-id="${glyph.glyphId}" transform="${glyph.glyphTransform}"><use href="#${glyph.unsupportedOutlineId}" xlink:href="#${glyph.unsupportedOutlineId}" class="ghost-outline unsupported" filter="url(#${scene.shadowFilterId})"${filterAttr} /></g>`
       }
       continue
     }
 
     if (glyph.ghostOutlineIds.length > 0) {
       ghostLayerContent += `<g class="glyph-ghost" data-glyph-id="${glyph.glyphId}" transform="${glyph.glyphTransform}">${glyph.ghostOutlineIds
-        .map((id) => `<use href="#${id}" xlink:href="#${id}" class="ghost-outline"${filterAttr} />`)
+        .map((id) => `<use href="#${id}" xlink:href="#${id}" class="ghost-outline" filter="url(#${scene.shadowFilterId})"${filterAttr} />`)
         .join('')}</g>`
     }
 
@@ -1090,6 +1189,26 @@ export function renderSvgFrame(scene: PreparedRenderScene, progressMs: number = 
 
     for (const conn of scene.connections) {
       if (conn.fromGlyphIndex === glyph.glyphIndex) {
+        if (
+          conn.bridgePath &&
+          conn.bridgeLength &&
+          conn.bridgeStartMs !== undefined &&
+          conn.bridgeEndMs !== undefined
+        ) {
+          const duration = conn.bridgeEndMs - conn.bridgeStartMs
+          const progress =
+            duration > 0
+              ? progressMs <= conn.bridgeStartMs
+                ? 0
+                : progressMs >= conn.bridgeEndMs
+                  ? 1
+                  : smoothProgress((progressMs - conn.bridgeStartMs) / duration)
+              : progressMs >= conn.bridgeEndMs
+                ? 1
+                : 0
+          const dashLength = progress > 0 ? conn.bridgeLength * progress : 0
+          glyphInk += `<path id="${conn.connMaskId}-ink" class="ink-connection-bridge" d="${conn.bridgePath}" fill="none" stroke-width="${fmtNum(conn.bridgeBrushHeight || DEFAULT_BRUSH_HEIGHT)}" stroke-dasharray="${fmtNum(dashLength)} ${fmtNum(Math.max(conn.bridgeLength - dashLength, 0.001))}" />`
+        }
         glyphInk += `<g mask="url(#${conn.connMaskId})"><use href="#${conn.nextOutlineId}" xlink:href="#${conn.nextOutlineId}" class="ink-outline" transform="translate(${conn.dx}, ${conn.dy})"${filterAttr} /></g>`
       }
     }

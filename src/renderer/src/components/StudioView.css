@@ -333,7 +333,15 @@
 /* Ink outline: vibrant revealed ink using selected stroke color */
 .svg-container .ink-outline {
   fill: var(--active-ink-color, #0f766e);
-  filter: drop-shadow(0 2px 4px rgba(15, 118, 110, 0.18));
+  filter: blur(0.35px) drop-shadow(0 2px 4px rgba(15, 118, 110, 0.18));
+}
+
+.svg-container .ink-connection-bridge {
+  fill: none;
+  stroke: var(--active-ink-color, #0f766e);
+  stroke-linecap: butt;
+  stroke-linejoin: round;
+  filter: blur(0.35px);
 }
 
 .unsupported-callout {

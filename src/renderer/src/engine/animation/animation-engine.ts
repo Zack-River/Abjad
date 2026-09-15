@@ -3,12 +3,16 @@ import { Stroke } from '../data/stroke-db'
 import { svgPathProperties } from 'svg-path-properties'
 
 const RAA_REFERENCE_INK_UNITS_PER_MS = 0.177012621
+const HANDOFF_START_INSET_UNITS = 32
+const MAX_HANDOFF_START_PROGRESS = 0.1
 
-function inkDurationMs(stroke: Stroke, endProgress: number = 1): number {
+function inkDurationMs(stroke: Stroke, endProgress: number = 1, startProgress: number = 0): number {
   if (!stroke.medianPath) return 1200
   const props = new svgPathProperties(stroke.medianPath)
   const length = props.getTotalLength()
-  const visibleLength = length * Math.max(0, Math.min(1, endProgress))
+  const start = Math.max(0, Math.min(1, startProgress))
+  const end = Math.max(start, Math.min(1, endProgress))
+  const visibleLength = length * (end - start)
   return visibleLength > 0 ? visibleLength / RAA_REFERENCE_INK_UNITS_PER_MS : 1200
 }
 
@@ -40,6 +44,8 @@ export interface AnimationStep {
   glyphIndex: number
   stroke: Stroke
   isDot: boolean
+  /** Initial fraction skipped when entering a normalized connected handoff. */
+  startProgress: number
   /** Terminal fraction of the authored path to reveal before a normalized handoff. */
   endProgress: number
   /** Movement before this authored stroke. It is not an educational step. */
@@ -66,7 +72,13 @@ export const BRIDGE_HANDOFF_PROGRESS = 0.0001
 const MIN_HANDOFF_PROGRESS = 0.55
 const MAX_HANDOFF_DISTANCE_UNITS = 36
 const MIN_HANDOFF_BACKTRACK_UNITS = 2
-const HANDOFF_SEARCH_SAMPLES = 64
+const HANDOFF_SEARCH_SAMPLES = 128
+const HANDOFF_SEARCH_REFINEMENTS = 8
+
+interface NormalizedHandoff {
+  endProgress: number
+  startProgress: number
+}
 
 interface StrokePointData {
   point: { x: number; y: number }
@@ -76,7 +88,8 @@ interface StrokePointData {
 function getStrokePointData(
   stroke: Stroke,
   atEnd: boolean,
-  endProgress: number = 1
+  endProgress: number = 1,
+  startProgress: number = 0
 ): StrokePointData | null {
   if (!stroke?.medianPath) return null
 
@@ -85,10 +98,11 @@ function getStrokePointData(
     const length = props.getTotalLength()
     if (!length) return null
 
-    const terminalLength = length * Math.max(0, Math.min(1, endProgress))
-    const pointLength = atEnd ? terminalLength : 0
+    const startLength = length * Math.max(0, Math.min(1, startProgress))
+    const terminalLength = length * Math.max(startProgress, Math.min(1, endProgress))
+    const pointLength = atEnd ? terminalLength : startLength
     const tangentWindow = Math.min(12, Math.max(2, length * 0.02))
-    const beforeLength = Math.max(0, pointLength - tangentWindow)
+    const beforeLength = Math.max(atEnd ? startLength : 0, pointLength - tangentWindow)
     const afterLength = Math.min(terminalLength, pointLength + tangentWindow)
     const before = props.getPointAtLength(beforeLength)
     const after = props.getPointAtLength(afterLength)
@@ -109,9 +123,10 @@ function getWorldStrokePoint(
   glyph: ComposedGlyph,
   stroke: Stroke,
   atEnd: boolean,
-  endProgress: number = 1
+  endProgress: number = 1,
+  startProgress: number = 0
 ): StrokePointData | null {
-  const local = getStrokePointData(stroke, atEnd, endProgress)
+  const local = getStrokePointData(stroke, atEnd, endProgress, startProgress)
   if (!local) return null
   return {
     point: {
@@ -142,16 +157,32 @@ function findNextBaseBodyStroke(
   return null
 }
 
-function getNormalizedHandoffProgress(
+function getNormalizedHandoff(
   glyph: ComposedGlyph,
   stroke: ComposedGlyph['orderedStrokes'][number],
   nextGlyph: ComposedGlyph,
   nextStroke: ComposedGlyph['orderedStrokes'][number]
-): number | null {
+): NormalizedHandoff | null {
   if (!stroke.medianPath || !nextStroke.medianPath) return null
 
   const fullEnd = getWorldStrokePoint(glyph, stroke as unknown as Stroke, true)
-  const nextStart = getWorldStrokePoint(nextGlyph, nextStroke as unknown as Stroke, false)
+  let nextStartProgress = 0
+  try {
+    const nextPath = new svgPathProperties(nextStroke.medianPath)
+    const nextLength = nextPath.getTotalLength()
+    if (!nextLength) return null
+    nextStartProgress = Math.min(MAX_HANDOFF_START_PROGRESS, HANDOFF_START_INSET_UNITS / nextLength)
+  } catch {
+    return null
+  }
+
+  const nextStart = getWorldStrokePoint(
+    nextGlyph,
+    nextStroke as unknown as Stroke,
+    false,
+    1,
+    nextStartProgress
+  )
   if (!fullEnd || !nextStart) return null
 
   const remainingVector = {
@@ -165,26 +196,55 @@ function getNormalizedHandoffProgress(
     const length = path.getTotalLength()
     if (!length) return null
 
-    let nearestProgress = 1
-    let nearestDistanceSquared = Infinity
-    for (let index = 0; index <= HANDOFF_SEARCH_SAMPLES; index += 1) {
-      const progress =
-        MIN_HANDOFF_PROGRESS + ((1 - MIN_HANDOFF_PROGRESS) * index) / HANDOFF_SEARCH_SAMPLES
+    const distanceSquaredAt = (progress: number): number => {
       const point = path.getPointAtLength(length * progress)
       const dx = glyph.glyphX + point.x - nextStart.point.x
       const dy = glyph.glyphY + point.y - nextStart.point.y
-      const distanceSquared = dx * dx + dy * dy
+      return dx * dx + dy * dy
+    }
+
+    let nearestProgress = 1
+    let nearestDistanceSquared = Infinity
+    const searchStep = (1 - MIN_HANDOFF_PROGRESS) / HANDOFF_SEARCH_SAMPLES
+    for (let index = 0; index <= HANDOFF_SEARCH_SAMPLES; index += 1) {
+      const progress =
+        MIN_HANDOFF_PROGRESS + ((1 - MIN_HANDOFF_PROGRESS) * index) / HANDOFF_SEARCH_SAMPLES
+      const distanceSquared = distanceSquaredAt(progress)
       if (distanceSquared < nearestDistanceSquared) {
         nearestProgress = progress
         nearestDistanceSquared = distanceSquared
       }
     }
 
+    // The coarse scan locates the right neighborhood. Refine it so the
+    // outgoing terminal is aligned to the incoming start instead of landing
+    // several units away because of sample quantization.
+    let lower = Math.max(MIN_HANDOFF_PROGRESS, nearestProgress - searchStep)
+    let upper = Math.min(1, nearestProgress + searchStep)
+    for (let iteration = 0; iteration < HANDOFF_SEARCH_REFINEMENTS; iteration += 1) {
+      const left = lower + (upper - lower) / 3
+      const right = upper - (upper - lower) / 3
+      if (distanceSquaredAt(left) <= distanceSquaredAt(right)) {
+        upper = right
+      } else {
+        lower = left
+      }
+    }
+    const refinedProgress = (lower + upper) / 2
+    const refinedDistanceSquared = distanceSquaredAt(refinedProgress)
+    if (refinedDistanceSquared < nearestDistanceSquared) {
+      nearestProgress = refinedProgress
+      nearestDistanceSquared = refinedDistanceSquared
+    }
+
     if (nearestProgress >= 0.99 || nearestDistanceSquared > MAX_HANDOFF_DISTANCE_UNITS ** 2) {
       return null
     }
 
-    return nearestProgress
+    return {
+      endProgress: nearestProgress,
+      startProgress: nextStartProgress
+    }
   } catch {
     return null
   }
@@ -316,13 +376,14 @@ export function getStepStrokeProgress(step: AnimationStep, progressMs: number): 
     0,
     Math.min(1, duration > 0 ? (progressMs - step.startMs) / duration : 0)
   )
-  return smoothProgress(linearProgress) * step.endProgress
+  if (progressMs <= step.startMs) return 0
+  return step.startProgress + smoothProgress(linearProgress) * (step.endProgress - step.startProgress)
 }
 
 /**
- * Mask coverage always completes the authored stroke. `endProgress` only
- * controls the pen's terminal handoff point, so a normalized cursor cannot
- * carve a gap out of the outgoing glyph outline.
+ * Mask coverage follows the authored terminal handoff. A clipped terminal
+ * must not reveal the remaining tail of its median path, because that tail
+ * can pass beyond the next glyph's start and create an aggressive join.
  */
 export function getStepInkProgress(step: AnimationStep, progressMs: number): number {
   const duration = step.endMs - step.startMs
@@ -330,7 +391,8 @@ export function getStepInkProgress(step: AnimationStep, progressMs: number): num
     0,
     Math.min(1, duration > 0 ? (progressMs - step.startMs) / duration : 0)
   )
-  return smoothProgress(linearProgress)
+  if (progressMs <= step.startMs) return 0
+  return step.startProgress + smoothProgress(linearProgress) * (step.endProgress - step.startProgress)
 }
 
 export function buildTimeline(
@@ -340,6 +402,13 @@ export function buildTimeline(
   const steps: AnimationStep[] = []
   let currentTimeMs = 0
   let previousBodyStep: AnimationStep | undefined
+  const handoffStartProgresses = new Map<string, number>()
+
+  const strokeKey = (
+    glyphIndex: number,
+    stroke: ComposedGlyph['orderedStrokes'][number]
+  ): string =>
+    `${glyphIndex}:${stroke.order ?? 0}`
 
   for (let i = 0; i < composed.length; i++) {
     const glyph = composed[i]
@@ -349,11 +418,16 @@ export function buildTimeline(
       const bodyStrokes = glyph.orderedStrokes.filter((candidate) => !isDotStroke(candidate, glyph))
       const isTerminalBodyStroke = !isDot && bodyStrokes[bodyStrokes.length - 1] === stroke
       const nextBody = isTerminalBodyStroke ? findNextBaseBodyStroke(composed, i) : null
-      const endProgress =
+      const normalizedHandoff =
         nextBody && canConnectToNext(glyph) && canConnectFromPrevious(nextBody.glyph)
-          ? (getNormalizedHandoffProgress(glyph, stroke, nextBody.glyph, nextBody.stroke) ?? 1)
-          : 1
-      const durationMs = inkDurationMs(stroke as unknown as Stroke, endProgress)
+          ? getNormalizedHandoff(glyph, stroke, nextBody.glyph, nextBody.stroke)
+          : null
+      const endProgress = normalizedHandoff?.endProgress ?? 1
+      if (normalizedHandoff && nextBody) {
+        handoffStartProgresses.set(strokeKey(i + 1, nextBody.stroke), normalizedHandoff.startProgress)
+      }
+      const startProgress = handoffStartProgresses.get(strokeKey(i, stroke)) ?? 0
+      const durationMs = inkDurationMs(stroke as unknown as Stroke, endProgress, startProgress)
 
       // When crossing a glyph boundary, calculate physical distance and create
       // either a short cursive bridge or a lifted travel transition.
@@ -377,7 +451,13 @@ export function buildTimeline(
           true,
           boundaryStep.endProgress
         )
-        const currentStart = getWorldStrokePoint(glyph, currentStroke, false)
+        const currentStart = getWorldStrokePoint(
+          glyph,
+          currentStroke,
+          false,
+          endProgress,
+          startProgress
+        )
         const dist =
           previousEnd && currentStart
             ? Math.hypot(
@@ -387,12 +467,6 @@ export function buildTimeline(
             : null
 
         if (dist !== null && previousEnd && currentStart) {
-          // A normalized terminal path has already reached the incoming
-          // stroke's start vicinity. Snap the cursor endpoint to that exact
-          // authored start so no fractional sampling gap remains at handoff.
-          if (boundaryStep.endProgress < 1) {
-            previousEnd.point = { ...currentStart.point }
-          }
           const isBodyBoundary =
             !boundaryStep.isDot &&
             !isDot &&
@@ -446,7 +520,13 @@ export function buildTimeline(
       } else if (steps.length > 0) {
         const previousGlyph = composed[previousStep.glyphIndex]
         const previousEnd = getWorldStrokePoint(previousGlyph, previousStep.stroke, true)
-        const currentStart = getWorldStrokePoint(glyph, stroke as unknown as Stroke, false)
+        const currentStart = getWorldStrokePoint(
+          glyph,
+          stroke as unknown as Stroke,
+          false,
+          1,
+          startProgress
+        )
         if (previousEnd && currentStart) {
           transition = createTransition(
             `${glyph.hb.glyphId}-stroke-lift-${stroke.order ?? steps.length}`,
@@ -465,6 +545,7 @@ export function buildTimeline(
         glyphIndex: i,
         stroke: stroke as unknown as Stroke,
         isDot,
+        startProgress,
         endProgress,
         transition,
         // A connected handoff is an overlap, not a blank interval. Start the

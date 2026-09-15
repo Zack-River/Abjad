@@ -338,6 +338,14 @@ h1 {
 }
 .ink-outline {
   fill: var(--teal);
+  filter: blur(0.35px);
+}
+.ink-connection-bridge {
+  fill: none;
+  stroke: var(--active-ink-color, #0f766e);
+  stroke-linecap: butt;
+  stroke-linejoin: round;
+  pointer-events: none;
 }
 .mask-base {
   fill: #000;

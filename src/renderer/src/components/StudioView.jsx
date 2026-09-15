@@ -98,7 +98,8 @@ function buildStandaloneSvg(
       .baseline { stroke: rgba(15, 118, 110, 0.2); stroke-dasharray: 6 4; }
       .ghost-outline { fill: ${shadowStyle.color}; opacity: ${shadowStyle.opacity}; }
       .ghost-outline.unsupported { fill: #94a3b8; opacity: 0.3; }
-      .ink-outline { fill: ${strokeColor};${raster ? ` filter: blur(${RASTER_EXPORT_EDGE_BLUR}px);` : ' filter: drop-shadow(0 2px 4px rgba(15, 118, 110, 0.18));'} }
+      .ink-outline { fill: ${strokeColor}; filter: blur(${RASTER_EXPORT_EDGE_BLUR}px)${raster ? ';' : ' drop-shadow(0 2px 4px rgba(15, 118, 110, 0.18));'} }
+      .ink-connection-bridge { fill: none; stroke: ${strokeColor}; stroke-linecap: butt; stroke-linejoin: round; filter: blur(${RASTER_EXPORT_EDGE_BLUR}px); }
       .median-path { display: none; }
     </style>
   </defs>
@@ -412,7 +413,13 @@ function preparedStrokeProgress(stroke, progressMs) {
   if (!stroke.step) return progressMs > 0 ? 1 : 0
   const duration = stroke.step.endMs - stroke.step.startMs
   const linear = Math.max(0, Math.min(1, duration > 0 ? (progressMs - stroke.step.startMs) / duration : 0))
-  return Math.max(smoothProgress(linear), getBridgeHandoffProgress(stroke.step, progressMs))
+  if (progressMs <= stroke.step.startMs) return 0
+  const startProgress = stroke.step.startProgress ?? 0
+  const terminalProgress = stroke.step.endProgress ?? 1
+  return Math.max(
+    startProgress + smoothProgress(linear) * (terminalProgress - startProgress),
+    getBridgeHandoffProgress(stroke.step, progressMs)
+  )
 }
 
 function addCanvasBrush(context, x, y, angle, width, height) {
@@ -526,6 +533,11 @@ function rasterizePreparedSceneToCanvas(
       const progress = preparedStrokeProgress(stroke, progressMs)
       if (progress <= 0) continue
 
+      const startProgress = stroke.step?.startProgress ?? 0
+      const startCount = Math.min(
+        stroke.fixedCount,
+        Math.ceil((stroke.length * startProgress) / stroke.spacing)
+      )
       const activeCount = Math.min(
         stroke.fixedCount,
         Math.floor((stroke.length * progress) / stroke.spacing)
@@ -534,7 +546,7 @@ function rasterizePreparedSceneToCanvas(
       clipDotProgress(context, stroke, progress)
       context.beginPath()
 
-      for (let index = 0; index <= activeCount; index++) {
+      for (let index = startCount; index <= activeCount; index++) {
         const offset = index * 4
         const geometry = getBrushSquareGeometry(stroke, stroke.samples[offset], scene.strokeWeight)
         addCanvasBrush(
@@ -548,7 +560,7 @@ function rasterizePreparedSceneToCanvas(
       }
 
       const lastFixed = Math.min(1, (activeCount * stroke.spacing) / stroke.length)
-      if (progress > lastFixed) {
+      if (progress > lastFixed && progress > startProgress) {
         const pointProgress = Math.max(0, Math.min(1, progress))
         const point = stroke.pathProps.getPointAtLength(stroke.length * pointProgress)
         const halfWindow = Math.min(stroke.isDot ? 0.08 : 0.014, (stroke.isDot ? 6 : 9) / stroke.length)
@@ -582,6 +594,61 @@ function rasterizePreparedSceneToCanvas(
     }
     context.restore()
   }
+
+  // Paint only the measured terminal-to-start handoff during its own interval.
+  // This keeps the connector smooth without revealing any future glyph area.
+  context.save()
+  context.strokeStyle = strokeColor
+  context.lineCap = 'butt'
+  context.lineJoin = 'round'
+  context.filter = `blur(${RASTER_EXPORT_EDGE_BLUR}px)`
+  for (const connection of scene.connections) {
+    if (
+      !connection.bridgePath ||
+      !connection.bridgeLength ||
+      connection.bridgeStartMs === undefined ||
+      connection.bridgeEndMs === undefined
+    ) {
+      continue
+    }
+
+    const duration = connection.bridgeEndMs - connection.bridgeStartMs
+    const progress =
+      duration > 0
+        ? progressMs <= connection.bridgeStartMs
+          ? 0
+          : progressMs >= connection.bridgeEndMs
+            ? 1
+            : smoothProgress((progressMs - connection.bridgeStartMs) / duration)
+        : progressMs >= connection.bridgeEndMs
+          ? 1
+          : 0
+    if (progress <= 0) continue
+
+    const sourceGlyph = scene.glyphs[connection.fromGlyphIndex]
+    if (!sourceGlyph) continue
+    const position = parseTranslate(sourceGlyph.glyphTransform)
+    const pathId = `__handoff__${connection.connMaskId}`
+    let bridgePath = pathCache.get(pathId)
+    if (!bridgePath) {
+      bridgePath = new Path2D(connection.bridgePath)
+      pathCache.set(pathId, bridgePath)
+    }
+
+    context.save()
+    context.translate(position.x, position.y)
+    context.lineWidth = connection.bridgeBrushHeight || DEFAULT_STROKE_WEIGHT
+    context.setLineDash([
+      connection.bridgeLength * progress,
+      Math.max(connection.bridgeLength * (1 - progress), 0.001)
+    ])
+    context.stroke(bridgePath)
+    context.restore()
+  }
+  context.setLineDash([])
+  context.filter = 'none'
+  context.restore()
+
   context.restore()
 }
 

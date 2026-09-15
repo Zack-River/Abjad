@@ -98,6 +98,19 @@ async function run(): Promise<void> {
     handoffFrame.slice(nextMaskStart, nextMaskEnd).includes('<rect'),
     'bridge exposes the next body handoff brush stamp'
   )
+  const outgoingBridge = scene.connections.find(
+    (connection) => connection.mode === 'outgoing-mask'
+  )
+  assert(outgoingBridge?.bridgePath, 'ordinary connected joins keep a measured bridge path')
+  const outgoingBridgeFrame = renderSvgFrame(
+    scene,
+    outgoingBridge!.bridgeStartMs! +
+      (outgoingBridge!.bridgeEndMs! - outgoingBridge!.bridgeStartMs!) / 2
+  )
+  assert(
+    outgoingBridgeFrame.includes('class="ink-connection-bridge"'),
+    'ordinary connected joins paint the rounded ink bridge'
+  )
 
   const bridge = connectedBodies[1].transition!
   const bridgePath = new svgPathProperties(bridge.path)
@@ -144,20 +157,20 @@ async function run(): Promise<void> {
   )
   const overshootingStep = overshootingPair.steps[0]
   assert(
-    Math.abs(overshootingStep.endProgress - 100 / 140) < 0.03,
-    'an overshooting terminal path stops at the following stroke start'
+    Math.abs(overshootingStep.endProgress - 108 / 140) < 0.03,
+    'an overshooting terminal path stops at the shared handoff center'
   )
   assert(
-    Math.abs(getStepStrokeProgress(overshootingStep, overshootingStep.endMs) - 100 / 140) < 0.03,
+    Math.abs(getStepStrokeProgress(overshootingStep, overshootingStep.endMs) - 108 / 140) < 0.03,
     'the renderer-facing progress helper never reveals the overshooting tail'
   )
   assert(
-    getStepInkProgress(overshootingStep, overshootingStep.endMs) === 1,
-    'a normalized handoff preserves full ink coverage for the outgoing letter'
+    Math.abs(getStepInkProgress(overshootingStep, overshootingStep.endMs) - 108 / 140) < 0.03,
+    'a normalized handoff stops outgoing ink at the terminal point'
   )
   assert(
-    overshootingPair.steps[1].transition?.startPoint.x === 100,
-    'the next body handoff starts at its own first point after normalization'
+    Math.abs((overshootingPair.steps[1].transition?.startPoint.x ?? Infinity) - 108) < 0.5,
+    'the next body handoff starts at the shared center inside its original terminal'
   )
 
   const detached = setupEngine('أبجد', {
@@ -275,9 +288,13 @@ async function run(): Promise<void> {
       const sourceStep = [...longWord.timeline.steps]
         .reverse()
         .find((step) => step.glyphIndex === connection.fromGlyphIndex && !step.isDot)
-      return sourceStep?.endProgress === 1
+      return sourceStep?.endProgress === 1 || connection.mode === 'handoff-mask'
     }),
-    'a clipped handoff never uses the completed outgoing mask to reveal the next glyph'
+    'a clipped handoff uses a dedicated bridge mask instead of the completed outgoing mask'
+  )
+  assert(
+    sparseLiveScene.connections.some((connection) => connection.mode === 'handoff-mask'),
+    'connected clipped letters receive a localized handoff mask'
   )
 
   assert(
@@ -295,8 +312,31 @@ async function run(): Promise<void> {
     'body coverage follows the travelled brush path continuously'
   )
   assert(
+    progressiveFrame.includes('shadow-normalize') &&
+      progressiveFrame.includes('class="ghost-outline" filter="url(#sparse-live-shadow-normalize)"') &&
+      progressiveFrame.includes('filter="url(#sparse-live-shadow-normalize)"'),
+    'shadow geometry uses the dedicated normalization filter'
+  )
+  assert(
+    !progressiveFrame.includes('class="ink-outline" filter="url(#sparse-live-shadow-normalize)"'),
+    'ink geometry remains unaffected by shadow normalization'
+  )
+  assert(
     !progressiveFrame.includes('glyph-completion-fill'),
     'no completed outline is injected ahead of the brush path'
+  )
+  const clippedHandoff = sparseLiveScene.connections.find(
+    (connection) => connection.mode === 'handoff-mask'
+  )
+  assert(clippedHandoff, 'long-word scene has a clipped handoff connector')
+  const clippedHandoffFrame = renderSvgFrame(
+    sparseLiveScene,
+    clippedHandoff.bridgeStartMs! +
+      (clippedHandoff.bridgeEndMs! - clippedHandoff.bridgeStartMs!) / 2
+  )
+  assert(
+    clippedHandoffFrame.includes('class="ink-connection-bridge"'),
+    'bridge paints a dedicated rounded ink connector during handoff'
   )
 
   const tariq = setupEngine('طارق', {

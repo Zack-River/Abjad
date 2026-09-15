@@ -121,7 +121,10 @@ function getPrecomputedCursor(cursorTimeline, progressMs) {
   // keeps bridge motion and lifted motion identical in the board and exports.
   for (const item of transitions) {
     const transition = item.transition
-    if (progressMs > transition.startMs && progressMs < transition.endMs) {
+    // Own both boundary frames. Excluding either endpoint makes the cursor
+    // fall back to the adjacent stroke for one frame and visibly jump at a
+    // terminal/start handoff.
+    if (progressMs >= transition.startMs && progressMs <= transition.endMs) {
       const duration = transition.endMs - transition.startMs
       const transitionT = duration > 0 ? (progressMs - transition.startMs) / duration : 0
       const easedT = transitionT * transitionT * (3 - 2 * transitionT)
@@ -170,7 +173,9 @@ function getPrecomputedCursor(cursorTimeline, progressMs) {
   const clampedProgress = Math.max(0, Math.min(1, stepProgress))
   const easedProgress = clampedProgress * clampedProgress * (3 - 2 * clampedProgress)
   const terminalProgress = sd.step?.endProgress ?? 1
-  const pt = sd.pathProps.getPointAtLength(sd.length * easedProgress * terminalProgress)
+  const startProgress = sd.step?.startProgress ?? 0
+  const pathProgress = startProgress + easedProgress * (terminalProgress - startProgress)
+  const pt = sd.pathProps.getPointAtLength(sd.length * pathProgress)
   return {
     x: pt.x + sd.glyphX,
     y: pt.y + sd.glyphY,
@@ -254,9 +259,12 @@ export default function TegakiBoard({
   const updateContinuousMask = (stroke, continuousPath, prog, weight) => {
     if (!continuousPath) return
     const progress = clamp(prog)
+    const startProgress = clamp(stroke.step?.startProgress ?? 0)
+    const startLength = stroke.length * startProgress
     const { height } = getBrushSquareGeometry(stroke, progress, weight)
-    const dashLength = Math.max(stroke.length * progress, 0.001)
+    const dashLength = Math.max(stroke.length * Math.max(progress - startProgress, 0), 0.001)
     continuousPath.setAttribute('stroke-width', fmtNum(height))
+    continuousPath.setAttribute('stroke-dashoffset', fmtNum(-startLength))
     continuousPath.setAttribute(
       'stroke-dasharray',
       `${fmtNum(dashLength)} ${fmtNum(Math.max(stroke.length - dashLength, 0.001))}`
@@ -273,6 +281,41 @@ export default function TegakiBoard({
       }
     }
     updateContinuousMask(stroke, strokeDom.continuousPath, prog, weight)
+  }
+
+  const updateHandoffMasks = (connections, currentMs) => {
+    for (const connection of connections) {
+      if (
+        (!connection.pathEl && !connection.inkPathEl) ||
+        !connection.bridgeLength ||
+        connection.bridgeStartMs === undefined ||
+        connection.bridgeEndMs === undefined
+      ) {
+        continue
+      }
+      const duration = connection.bridgeEndMs - connection.bridgeStartMs
+      const progress =
+        duration > 0
+          ? currentMs <= connection.bridgeStartMs
+            ? 0
+            : currentMs >= connection.bridgeEndMs
+              ? 1
+              : clamp((currentMs - connection.bridgeStartMs) / duration)
+          : currentMs >= connection.bridgeEndMs
+            ? 1
+            : 0
+      const easedProgress = progress * progress * (3 - 2 * progress)
+      const dashLength = Math.max(connection.bridgeLength * easedProgress, 0.001)
+      const dashArray = `${fmtNum(dashLength)} ${fmtNum(Math.max(connection.bridgeLength - dashLength, 0.001))}`
+      connection.pathEl?.setAttribute('stroke-dasharray', dashArray)
+      if (connection.inkPathEl) {
+        const inkDashLength = easedProgress > 0 ? connection.bridgeLength * easedProgress : 0
+        connection.inkPathEl.setAttribute(
+          'stroke-dasharray',
+          `${fmtNum(inkDashLength)} ${fmtNum(Math.max(connection.bridgeLength - inkDashLength, 0.001))}`
+        )
+      }
+    }
   }
 
   // 1. Mount static SVG tree when composition or dimensions change
@@ -406,10 +449,18 @@ export default function TegakiBoard({
     })
 
     const cursorEl = wrapperRef.current.querySelector('#tracking-cursor')
+    const connectionDoms = scene.connections
+      .filter((connection) => connection.bridgePath && connection.bridgeLength)
+      .map((connection) => ({
+        ...connection,
+        pathEl: wrapperRef.current.querySelector(`#${connection.connMaskId} .connection-mask-path`),
+        inkPathEl: wrapperRef.current.querySelector(`#${connection.connMaskId}-ink`)
+      }))
     domRefs.current = {
       ghostEl,
       strokeDoms,
-      cursorEl
+      cursorEl,
+      connectionDoms
     }
 
     // Initialize committed counts
@@ -449,6 +500,7 @@ export default function TegakiBoard({
 
       const strokes = scene.strokes
       const committed = committedCountsRef.current
+      updateHandoffMasks(dom.connectionDoms || [], currentMs)
       const isBackward = currentMs < lastProgressRef.current
       const isReplayStart =
         currentMs === 0 &&
@@ -484,9 +536,13 @@ export default function TegakiBoard({
             committed[sIdx] = -1
             if (sd.clipPoly) sd.clipPoly.removeAttribute('points')
           } else {
+            const startCount = Math.min(
+              stroke.fixedCount,
+              Math.ceil((stroke.length * (stroke.step?.startProgress ?? 0)) / stroke.spacing)
+            )
             const activeCount = Math.min(stroke.fixedCount, Math.floor((stroke.length * prog) / stroke.spacing))
             let stampsHtml = ''
-            for (let i = 0; i <= activeCount; i++) {
+            for (let i = startCount; i <= activeCount; i++) {
               stampsHtml += buildStampHtml(stroke, i, scene.strokeWeight)
             }
             sd.stampGroup.innerHTML = stampsHtml
@@ -521,7 +577,14 @@ export default function TegakiBoard({
           const stroke = strokes[sIdx]
           const sd = dom.strokeDoms[sIdx]
           const curCommitted = committed[sIdx] ?? -1
-          const terminalProgress = 1
+          // A connected terminal may intentionally stop before the authored
+          // path end. Finalize at that handoff point instead of revealing the
+          // old tail in a single frame.
+          const terminalProgress = stroke.step?.endProgress ?? 1
+          const startCount = Math.min(
+            stroke.fixedCount,
+            Math.ceil((stroke.length * (stroke.step?.startProgress ?? 0)) / stroke.spacing)
+          )
           const terminalCount = Math.min(
             stroke.fixedCount,
             Math.floor((stroke.length * terminalProgress) / stroke.spacing)
@@ -529,7 +592,7 @@ export default function TegakiBoard({
           if (sd) {
             if (curCommitted < terminalCount) {
               let newStamps = ''
-              for (let i = curCommitted + 1; i <= terminalCount; i++) {
+              for (let i = Math.max(curCommitted + 1, startCount); i <= terminalCount; i++) {
                 newStamps += buildStampHtml(stroke, i, scene.strokeWeight)
               }
               if (sd.headEl) {
@@ -567,7 +630,11 @@ export default function TegakiBoard({
             prog = Math.max(prog, getBridgeHandoffProgress(stroke.step, currentMs))
             updateContinuousMask(stroke, sd.continuousPath, prog, scene.strokeWeight)
 
-            const curCommitted = committed[sIdx] ?? -1
+            const startCount = Math.min(
+              stroke.fixedCount,
+              Math.ceil((stroke.length * (stroke.step?.startProgress ?? 0)) / stroke.spacing)
+            )
+            const curCommitted = Math.max(committed[sIdx] ?? -1, startCount - 1)
             if (prog > 0 && prog < 1) {
               const targetCount = Math.min(
                 stroke.fixedCount,
@@ -575,7 +642,7 @@ export default function TegakiBoard({
               )
               if (targetCount > curCommitted) {
                 let newStamps = ''
-                for (let i = curCommitted + 1; i <= targetCount; i++) {
+                for (let i = Math.max(curCommitted + 1, startCount); i <= targetCount; i++) {
                   newStamps += buildStampHtml(stroke, i, scene.strokeWeight)
                 }
                 if (sd.headEl) {
