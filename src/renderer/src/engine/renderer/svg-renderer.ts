@@ -2,7 +2,8 @@ import { ComposedGlyph } from '../composition/glyph-composer'
 import {
   AnimationTimeline,
   AnimationStep,
-  CONNECTION_THRESHOLD_UNITS
+  CONNECTION_THRESHOLD_UNITS,
+  getBridgeHandoffProgress
 } from '../animation/animation-engine'
 import { StrokeItem } from '../data/stroke-registry'
 import { svgPathProperties } from 'svg-path-properties'
@@ -11,37 +12,19 @@ function clamp(value: number): number {
   return Math.max(0, Math.min(1, value))
 }
 
-function lerp(from: number, to: number, progress: number): number {
-  return from + (to - from) * progress
-}
-
-function smoothstep(progress: number): number {
-  const value = clamp(progress)
-  return value * value * (3 - 2 * value)
-}
-
-const DEFAULT_BODY_BRUSH_RADIUS = 68
-const MAX_PROFILE_BODY_BRUSH_RADIUS = 96
-const DEFAULT_DOT_BRUSH_RADIUS = 48
-const DEFAULT_BODY_MAJOR_SCALE = 1.18
-const DEFAULT_BODY_MINOR_SCALE = 0.8
-const DEFAULT_DOT_AXIS_SCALE = 1.15
 const DEFAULT_BODY_STAMP_SPACING = 2.8
 const DEFAULT_DOT_STAMP_SPACING = 1.8
-const MIN_DOT_AXIS_RADIUS = 50
-const DEFAULT_STROKE_WEIGHT = 102
-const MIN_STROKE_WEIGHT = 94
+export const DEFAULT_STROKE_WEIGHT = 80
+const MIN_STROKE_WEIGHT = 50
 const MAX_STROKE_WEIGHT = 110
+export const GLOBAL_BRUSH_SCALE = 1
+const DEFAULT_BRUSH_WIDTH = 8
+const DEFAULT_BRUSH_HEIGHT = 80
+const DEFAULT_DOT_BRUSH_HEIGHT = 100
 const MAX_BODY_TANGENT_WINDOW = 0.014
 const MAX_DOT_TANGENT_WINDOW = 0.08
 const BODY_TANGENT_WINDOW_UNITS = 9
 const DOT_TANGENT_WINDOW_UNITS = 6
-
-function strokeWeightScale(strokeWeight: number): number {
-  // Keep the control narrow in font units while making its brush effect
-  // perceptible during progressive drawing.
-  return Math.pow(strokeWeight / DEFAULT_STROKE_WEIGHT, 2.5)
-}
 
 export interface BrushProfileValue {
   start?: number
@@ -60,56 +43,19 @@ export interface BrushProfile {
   [key: string]: number | BrushProfileValue | undefined
 }
 
-function brushRadius(
+function stampSpacing(
   profile: BrushProfile | undefined,
-  progress: number,
-  isDot: boolean = false,
-  strokeWeight: number = DEFAULT_STROKE_WEIGHT
+  isDot: boolean,
+  spacingScale: number = 1
 ): number {
-  const weightScale = strokeWeightScale(strokeWeight)
-  if (isDot) {
-    const dr = profile?.dotRadius
-    const dotBase =
-      typeof dr === 'number' && dr > 0
-        ? Math.min(dr, DEFAULT_DOT_BRUSH_RADIUS)
-        : DEFAULT_DOT_BRUSH_RADIUS
-    return dotBase * weightScale
-  }
-  if (!profile) return DEFAULT_BODY_BRUSH_RADIUS * weightScale
-  const start = profile.startRampEnd ?? 0.15
-  const end = profile.endRampStart ?? 0.8
-  const baseRadius = Math.min(
-    profile.bodyRadius || DEFAULT_BODY_BRUSH_RADIUS,
-    MAX_PROFILE_BODY_BRUSH_RADIUS
-  )
-  const baseStart = Math.min(profile.startRadius || 10, 15)
-  const baseEnd = Math.min(profile.endRadius || 52, 54)
-  if (progress < start)
-    return lerp(baseStart, baseRadius, smoothstep(progress / start)) * weightScale
-  if (progress > end)
-    return lerp(baseRadius, baseEnd, smoothstep((progress - end) / (1 - end))) * weightScale
-  return baseRadius * weightScale
-}
-
-function profileValue(
-  profile: BrushProfile | undefined,
-  key: string,
-  progress: number,
-  fallback: number
-): number {
-  if (!profile) return fallback
-  const value = profile[key]
-  if (typeof value === 'number') return value
-  if (!value || typeof value !== 'object') return fallback
-  if (progress < (profile.startRampEnd ?? 0.15)) return value.start ?? fallback
-  if (progress > (profile.endRampStart ?? 0.8)) return value.end ?? fallback
-  return value.body ?? fallback
-}
-
-function stampSpacing(profile: BrushProfile | undefined, isDot: boolean): number {
   const spacing = profile?.stampSpacing
-  if (typeof spacing === 'number') return Math.max(1, spacing)
-  return isDot ? DEFAULT_DOT_STAMP_SPACING : DEFAULT_BODY_STAMP_SPACING
+  const baseSpacing =
+    typeof spacing === 'number'
+      ? Math.max(1, spacing)
+      : isDot
+        ? DEFAULT_DOT_STAMP_SPACING
+        : DEFAULT_BODY_STAMP_SPACING
+  return baseSpacing * Math.max(1, spacingScale)
 }
 
 function tangentWindow(profile: BrushProfile | undefined, isDot: boolean, length: number): number {
@@ -177,6 +123,9 @@ export interface RenderOptions {
   showBaseline?: boolean
   strokeWeight?: number
   centerVertically?: boolean
+  includeMedianLayer?: boolean
+  /** Increase live-mask spacing without changing canonical export spacing. */
+  stampSpacingScale?: number
 }
 
 export interface ViewportTransform {
@@ -472,7 +421,6 @@ export function computeViewportTransform(
     }
   }
 
-
   // Fallback if no valid points found
   if (!Number.isFinite(minX)) minX = 0
   if (!Number.isFinite(maxX)) maxX = 600
@@ -579,13 +527,102 @@ function findStepForStroke(
  *   once at the outer word-group level.
  * - Deterministic mask IDs: `mask-g${glyphIndex}-s${strokeOrder}`.
  */
-export function renderSvg(
+function fmtNum(n: number): string {
+  const r = Math.round(n * 100) / 100
+  return String(r)
+}
+
+export interface PreparedStroke {
+  glyphIndex: number
+  strokeIndex: number
+  strokeOrder: number
+  isDot: boolean
+  maskId: string
+  progressClipId: string
+  medianPath: string
+  length: number
+  spacing: number
+  fixedCount: number
+  samples: Float32Array // packed: [pathProgress, x, y, angle] * (fixedCount + 1)
+  brushProfile?: BrushProfile
+  step?: AnimationStep
+  continuousMask: boolean
+  outlineIds: string[]
+  pathProps: InstanceType<typeof svgPathProperties>
+  maskX: number
+  maskY: number
+  maskWidth: number
+  maskHeight: number
+}
+
+export interface PreparedConnection {
+  fromGlyphIndex: number
+  connMaskId: string
+  nextOutlineId: string
+  dx: number
+  dy: number
+}
+
+export interface PreparedGlyph {
+  glyphIndex: number
+  glyphId: number
+  glyphTransform: string
+  isSupported: boolean
+  unsupportedOutlineId?: string
+  ghostOutlineIds: string[]
+  medianPaths: string[]
+  strokeIndices: number[]
+}
+
+export interface PreparedRenderScene {
+  viewport: ViewportTransform
+  stageWidth: number
+  stageHeight: number
+  showBaseline: boolean
+  strokeWeight: number
+  includeMedianLayer: boolean
+  idPrefix: string
+  weightDelta: number
+  weightFilterRadius: number
+  weightFilterId: string
+  strokeWeightFilter: string
+  defsOutlinesMarkup: string
+  outlineMap: Map<string, string>
+  glyphs: PreparedGlyph[]
+  strokes: PreparedStroke[]
+  connections: PreparedConnection[]
+}
+
+export interface BrushGeometry {
+  width: number
+  height: number
+}
+
+/** Shared narrow brush geometry for Canvas and SVG renderers. */
+export function getBrushSquareGeometry(
+  stroke: Pick<PreparedStroke, 'brushProfile' | 'isDot'>,
+  progress: number,
+  strokeWeight: number
+): BrushGeometry {
+  void progress
+  const scale = Math.max(0.25, strokeWeight / DEFAULT_STROKE_WEIGHT)
+  return {
+    width: DEFAULT_BRUSH_WIDTH * scale,
+    height: (stroke.isDot ? DEFAULT_DOT_BRUSH_HEIGHT : DEFAULT_BRUSH_HEIGHT) * scale
+  }
+}
+
+/**
+ * Prepares scene geometry once for an entire composition.
+ * Caches viewport bounds, TrueType outlines, stroke-step associations,
+ * connection geometry, and all fixed stamp sample coordinates and tangent angles.
+ */
+export function prepareRenderScene(
   composed: ComposedGlyph[],
   timeline?: AnimationTimeline,
-  progressMs: number = 0,
   renderId: string = '',
   options?: RenderOptions
-): string {
+): PreparedRenderScene {
   const stageWidth = options?.stageWidth ?? 600
   const stageHeight = options?.stageHeight ?? 300
   const showBaseline = options?.showBaseline ?? true
@@ -593,50 +630,72 @@ export function renderSvg(
     MIN_STROKE_WEIGHT,
     Math.min(MAX_STROKE_WEIGHT, options?.strokeWeight ?? DEFAULT_STROKE_WEIGHT)
   )
+  const includeMedianLayer = options?.includeMedianLayer ?? false
 
-  // 1. Compute exact viewport transform
-  const { scale, baselineY, tx } = computeViewportTransform(
+  const viewport = computeViewportTransform(
     composed,
     stageWidth,
     stageHeight,
     options?.centerVertically ?? false
   )
 
-  let defsContent = ''
-  let ghostLayerContent = ''
-  let inkLayerContent = ''
-  let medianLayerContent = ''
-
-  // Deterministic mask ID prefix (only if explicit custom renderId is provided)
   const idPrefix = renderId && renderId !== 'default' ? `${renderId}-` : ''
   const weightDelta = strokeWeight - DEFAULT_STROKE_WEIGHT
   const weightFilterRadius = Math.min(2.5, Math.abs(weightDelta) * 0.25)
   const weightFilterId = `${idPrefix}stroke-weight`
+  // The filter is attached to <use> elements inside the transformed word
+  // group. A viewport-sized user-space filter can be evaluated before that
+  // transform in Chromium and clip the entire glyph at non-default weights.
+  // Keep the effect region deliberately generous; the morphology radius is
+  // tiny compared with this safety bounds and the filter remains local to the
+  // rendered SVG scene.
+  const filterX = -100000
+  const filterY = -100000
+  const filterW = 200000
+  const filterH = 200000
   const strokeWeightFilter =
     weightFilterRadius > 0
-      ? `<filter id="${weightFilterId}" x="-5000" y="-5000" width="10000" height="10000" filterUnits="userSpaceOnUse" color-interpolation-filters="sRGB"><feMorphology operator="${weightDelta > 0 ? 'dilate' : 'erode'}" radius="${weightFilterRadius}" in="SourceGraphic" /></filter>`
+      ? `<filter id="${weightFilterId}" x="${filterX}" y="${filterY}" width="${filterW}" height="${filterH}" filterUnits="userSpaceOnUse" color-interpolation-filters="sRGB"><feMorphology operator="${weightDelta > 0 ? 'dilate' : 'erode'}" radius="${weightFilterRadius}" in="SourceGraphic" /></filter>`
       : ''
 
-  // 2. Iterate through composed glyphs
+  const outlineMap = new Map<string, string>()
+  let outlineCounter = 0
+  function getOrAddOutline(path: string): string {
+    let id = outlineMap.get(path)
+    if (!id) {
+      id = `${idPrefix}ot-${outlineCounter++}`
+      outlineMap.set(path, id)
+    }
+    return id
+  }
+
+  const glyphs: PreparedGlyph[] = []
+  const strokes: PreparedStroke[] = []
+
   for (let gIdx = 0; gIdx < composed.length; gIdx++) {
     const glyph = composed[gIdx]
     const gx = glyph.glyphX
     const gy = glyph.glyphY
-
     const glyphTransform = `translate(${gx}, ${gy})`
 
-    // --- UNSUPPORTED GLYPH HANDLING ---
     if (!glyph.isSupported || !glyph.definition) {
-      // If unsupported, render ghost outline ONLY if safe font geometry exists.
-      // Zero animated strokes, no fabricated medianPath, no fabricated mask stamps.
       const unsupportedOutline = glyph.definition?.outlinePath || ''
-      if (unsupportedOutline) {
-        ghostLayerContent += `<g class="glyph-ghost unsupported" data-glyph-id="${glyph.glyphId}" transform="${glyphTransform}"><path d="${unsupportedOutline}" class="ghost-outline unsupported"${weightFilterRadius > 0 ? ` filter="url(#${weightFilterId})"` : ''} /></g>`
-      }
+      const unsupportedOutlineId = unsupportedOutline
+        ? getOrAddOutline(unsupportedOutline)
+        : undefined
+      glyphs.push({
+        glyphIndex: gIdx,
+        glyphId: glyph.glyphId,
+        glyphTransform,
+        isSupported: false,
+        unsupportedOutlineId,
+        ghostOutlineIds: [],
+        medianPaths: [],
+        strokeIndices: []
+      })
       continue
     }
 
-    // --- SUPPORTED GLYPH RENDERING ---
     const definition = glyph.definition
     const outlinePath = definition.outlinePath || ''
     const outlinePaths = definition.outlinePaths?.length
@@ -644,70 +703,38 @@ export function renderSvg(
       : outlinePath
         ? [outlinePath]
         : []
-    const strokes = glyph.orderedStrokes || definition.strokes || []
+    const ghostOutlineIds = outlinePaths.map((p) => getOrAddOutline(p))
 
-    // Layer 1: Ghost outline (always visible in low opacity reference layer)
-    if (outlinePaths.length > 0) {
-      ghostLayerContent += `<g class="glyph-ghost" data-glyph-id="${glyph.glyphId}" transform="${glyphTransform}">${outlinePaths
-        .map(
-          (path) =>
-            `<path d="${path}" class="ghost-outline"${weightFilterRadius > 0 ? ` filter="url(#${weightFilterId})"` : ''} />`
-        )
-        .join('')}</g>`
-    }
+    const rawStrokes = glyph.orderedStrokes || definition.strokes || []
+    const strokeIndices: number[] = []
+    const medianPaths: string[] = []
 
-    let glyphInkContent = ''
-    let glyphMedianContent = ''
-
-    // Layer 2 & 3: Strokes & Mask Stamps
-    for (let sIdx = 0; sIdx < strokes.length; sIdx++) {
-      const stroke = strokes[sIdx]
+    for (let sIdx = 0; sIdx < rawStrokes.length; sIdx++) {
+      const stroke = rawStrokes[sIdx]
       const strokeOrder = stroke.order ?? sIdx
       const isDot = stroke.isCandidateDot ?? (stroke.type === 'dot' || glyph.semanticRole === 'dot')
 
-      // Find animation step
-      const step = findStepForStroke(timeline, gIdx, stroke, sIdx)
-      let progress = 0
-      if (step) {
-        const duration = step.endMs - step.startMs
-        const t = progressMs - step.startMs
-        const linearT = clamp(duration > 0 ? t / duration : 0)
-        // Calligraphic smoothstep easing for silky acceleration and deceleration
-        progress = linearT * linearT * (3 - 2 * linearT)
-      } else if (progressMs > 0 && (!timeline || timeline.steps.length === 0)) {
-        // Full reveal if progress requested without timeline
-        progress = 1
-      }
-
-      // Median path (for debug / reference layer in local font units)
       if (stroke.medianPath) {
-        glyphMedianContent += `<path d="${stroke.medianPath}" class="median-path" fill="none" />`
+        medianPaths.push(stroke.medianPath)
+      } else {
+        continue
       }
 
-      if (!stroke.medianPath) continue
-
-      // Deterministic mask ID
       const maskId = `${idPrefix}mask-g${gIdx}-s${strokeOrder}`
-
-      // Preserve verified stamping mathematics with smooth sliding tangent and denser coverage
+      const progressClipId = `${maskId}-progress-clip`
       const pathProps = new svgPathProperties(stroke.medianPath)
       const length = pathProps.getTotalLength()
       const brushProfile = (stroke as { brushProfile?: BrushProfile }).brushProfile
       const continuousMask = !isDot && brushProfile?.continuousMask === 1
-      const progressClipId = `${maskId}-progress-clip`
-      // The tangent clip is safe for dots, but not for looping bodies: when a
-      // circle revisits an earlier area, the half-plane would erase that area.
-      const progressClipPolygon = isDot ? getProgressClipPolygon(pathProps, length, progress) : null
+      const spacing = stampSpacing(brushProfile, isDot, options?.stampSpacingScale)
+      const fixedCount = Math.floor(length / spacing)
+      const samples = new Float32Array((fixedCount + 1) * 4)
 
-      const spacing = stampSpacing(brushProfile, isDot)
-      const fixedCount = Math.floor((length * progress) / spacing)
-      let fragments = ''
-
-      const stamp = (pathProgress: number): void => {
-        const clampedProg = clamp(pathProgress)
+      for (let index = 0; index <= fixedCount; index++) {
+        const pProg = Math.min(1, (index * spacing) / length)
+        const clampedProg = clamp(pProg)
         const point = pathProps.getPointAtLength(length * clampedProg)
 
-        // Continuous sliding window for tangent computation, preventing rotation wobble near endpoints
         const halfWin = tangentWindow(brushProfile, isDot, length)
         let t0 = clampedProg - halfWin
         let t1 = clampedProg + halfWin
@@ -721,161 +748,345 @@ export function renderSvg(
         const before = pathProps.getPointAtLength(length * t0)
         const after = pathProps.getPointAtLength(length * t1)
         const angle = Math.atan2(after.y - before.y, after.x - before.x) * (180 / Math.PI)
-        const radius = brushRadius(brushProfile, clampedProg, isDot, strokeWeight)
-        const majorScale = profileValue(
-          brushProfile,
-          'majorScale',
-          clampedProg,
-          isDot ? DEFAULT_DOT_AXIS_SCALE : DEFAULT_BODY_MAJOR_SCALE
-        )
-        const minorScale = profileValue(
-          brushProfile,
-          'minorScale',
-          clampedProg,
-          isDot ? DEFAULT_DOT_AXIS_SCALE : DEFAULT_BODY_MINOR_SCALE
-        )
-        const major = isDot
-          ? Math.max(radius * majorScale, MIN_DOT_AXIS_RADIUS * strokeWeightScale(strokeWeight))
-          : radius * majorScale
-        const minor = isDot
-          ? Math.max(radius * minorScale, MIN_DOT_AXIS_RADIUS * strokeWeightScale(strokeWeight))
-          : radius * minorScale
-        fragments += `<ellipse cx="0" cy="0" rx="${major}" ry="${minor}" transform="translate(${point.x} ${point.y}) rotate(${angle})"></ellipse>`
+
+        const offset = index * 4
+        samples[offset] = clampedProg
+        samples[offset + 1] = point.x
+        samples[offset + 2] = point.y
+        samples[offset + 3] = angle
       }
 
+      // Keep each mask close to the authored stroke. The old fixed 10,000 x
+      // 10,000 mask surface was needlessly expensive for animated exports and
+      // could force Chromium to allocate very large intermediate alpha buffers.
+      let minMaskX = Infinity
+      let maxMaskX = -Infinity
+      let minMaskY = Infinity
+      let maxMaskY = -Infinity
       for (let index = 0; index <= fixedCount; index++) {
-        stamp(Math.min(1, (index * spacing) / length))
+        const offset = index * 4
+        const x = samples[offset + 1]
+        const y = samples[offset + 2]
+        minMaskX = Math.min(minMaskX, x)
+        maxMaskX = Math.max(maxMaskX, x)
+        minMaskY = Math.min(minMaskY, y)
+        maxMaskY = Math.max(maxMaskY, y)
       }
-      const lastFixed = Math.min(1, (fixedCount * spacing) / length)
-      if (progress > lastFixed) stamp(progress)
+      const maskMargin = isDot ? 120 : 180
+      const maskX = Number.isFinite(minMaskX) ? minMaskX - maskMargin : -1500
+      const maskY = Number.isFinite(minMaskY) ? minMaskY - maskMargin : -1500
+      const maskWidth = Number.isFinite(maxMaskX)
+        ? Math.max(1, maxMaskX - minMaskX + maskMargin * 2)
+        : 3000
+      const maskHeight = Number.isFinite(maxMaskY)
+        ? Math.max(1, maxMaskY - minMaskY + maskMargin * 2)
+        : 3000
 
-      if (continuousMask && progress > 0) {
-        const maskRadius = brushRadius(brushProfile, progress, false, strokeWeight)
-        const maskScale = profileValue(
-          brushProfile,
-          'minorScale',
-          progress,
-          DEFAULT_BODY_MINOR_SCALE
-        )
-        const dashLength = Math.max(length * progress, 0.001)
-        fragments += `<path d="${stroke.medianPath}" fill="none" stroke="#fff" stroke-width="${maskRadius * 2 * maskScale}" stroke-linecap="butt" stroke-linejoin="round" stroke-dasharray="${dashLength} ${Math.max(length - dashLength, 0.001)}"></path>`
-      }
-
-      // Build mask in local glyph font units
-      // Using generous mask bounds so no glyph portion is clipped
-      defsContent += `
-        ${
-          progressClipPolygon
-            ? `<clipPath id="${progressClipId}" clipPathUnits="userSpaceOnUse"><polygon points="${progressClipPolygon}"></polygon></clipPath>`
-            : ''
-        }
-        <mask id="${maskId}" maskUnits="userSpaceOnUse" maskContentUnits="userSpaceOnUse" x="-5000" y="-5000" width="10000" height="10000">
-          <rect class="mask-base" fill="#000" x="-5000" y="-5000" width="10000" height="10000"></rect>
-          <g class="${isDot ? 'dot-mask-stamps' : 'body-mask-stamps'}" fill="#fff"${progressClipPolygon ? ` clip-path="url(#${progressClipId})"` : ''}>${fragments}</g>
-        </mask>
-      `
-
-      // Ink outline (Layer 2) - revealed progressively through the mask
       const strokeOutlines = stroke.outlinePaths?.length
         ? stroke.outlinePaths
         : stroke.outlinePath || outlinePath
           ? [stroke.outlinePath || outlinePath]
           : []
-      if (progress > 0 && strokeOutlines.length > 0) {
-        glyphInkContent += strokeOutlines
+      const strokeOutlineIds = strokeOutlines.map((p) => getOrAddOutline(p))
+
+      const step = findStepForStroke(timeline, gIdx, stroke, sIdx)
+
+      const strokeGlobalIndex = strokes.length
+      strokes.push({
+        glyphIndex: gIdx,
+        strokeIndex: sIdx,
+        strokeOrder,
+        isDot,
+        maskId,
+        progressClipId,
+        medianPath: stroke.medianPath,
+        length,
+        spacing,
+        fixedCount,
+        samples,
+        brushProfile,
+        step,
+        continuousMask,
+        outlineIds: strokeOutlineIds,
+        pathProps,
+        maskX,
+        maskY,
+        maskWidth,
+        maskHeight
+      })
+      strokeIndices.push(strokeGlobalIndex)
+    }
+
+    glyphs.push({
+      glyphIndex: gIdx,
+      glyphId: glyph.glyphId,
+      glyphTransform,
+      isSupported: true,
+      ghostOutlineIds,
+      medianPaths,
+      strokeIndices
+    })
+  }
+
+  // Precompute connection ownership
+  const connections: PreparedConnection[] = []
+  for (let gIdx = 0; gIdx < composed.length - 1; gIdx++) {
+    if (composed[gIdx + 1].glyphId === 15) continue // Skip final ب
+    const glyph = composed[gIdx]
+    const nextGlyph = composed[gIdx + 1]
+    const nextBodyStep = timeline?.steps.find(
+      (step) => step.glyphIndex === gIdx + 1 && !step.isDot
+    )
+
+    // The animation timeline owns the join decision. Do not pre-reveal a
+    // neighboring outline in separated-stroke mode or during a lifted move.
+    if (nextBodyStep?.transition?.kind !== 'bridge') continue
+
+    const rawStrokes = glyph.orderedStrokes || glyph.definition?.strokes || []
+    const bodyStrokes = rawStrokes.filter(
+      (s) => !(s.isCandidateDot ?? (s.type === 'dot' || glyph.semanticRole === 'dot'))
+    )
+    const connectingStroke =
+      bodyStrokes.length > 0
+        ? bodyStrokes[bodyStrokes.length - 1]
+        : rawStrokes[rawStrokes.length - 1]
+    const nextStrokes = nextGlyph.orderedStrokes || nextGlyph.definition?.strokes || []
+    const nextFirstStroke = nextStrokes[0]
+
+    if (connectingStroke && nextFirstStroke) {
+      let endPt = connectingStroke.endPoint
+      if (!endPt && connectingStroke.medianPath) {
+        try {
+          const p = new svgPathProperties(connectingStroke.medianPath)
+          endPt = p.getPointAtLength(p.getTotalLength())
+        } catch {
+          // ignore
+        }
+      }
+
+      let startPt = nextFirstStroke.startPoint
+      if (!startPt && nextFirstStroke.medianPath) {
+        try {
+          const p = new svgPathProperties(nextFirstStroke.medianPath)
+          startPt = p.getPointAtLength(0)
+        } catch {
+          // ignore
+        }
+      }
+
+      if (endPt && startPt) {
+        const ex = glyph.glyphX + endPt.x
+        const ey = glyph.glyphY + endPt.y
+        const sx = nextGlyph.glyphX + startPt.x
+        const sy = nextGlyph.glyphY + startPt.y
+        const dist = Math.hypot(ex - sx, ey - sy)
+
+        if (dist < CONNECTION_THRESHOLD_UNITS) {
+          const connStrokeOrder =
+            connectingStroke.order ??
+            (rawStrokes.indexOf(connectingStroke) >= 0
+              ? rawStrokes.indexOf(connectingStroke)
+              : rawStrokes.length - 1)
+          const connMaskId = `${idPrefix}mask-g${gIdx}-s${connStrokeOrder}`
+          const nextOutlinePath = nextGlyph.definition?.outlinePath || ''
+          if (nextOutlinePath) {
+            const nextOutlineId = getOrAddOutline(nextOutlinePath)
+            const dx = nextGlyph.glyphX - glyph.glyphX
+            const dy = nextGlyph.glyphY - glyph.glyphY
+            connections.push({
+              fromGlyphIndex: gIdx,
+              connMaskId,
+              nextOutlineId,
+              dx,
+              dy
+            })
+          }
+        }
+      }
+    }
+  }
+
+  let defsOutlinesMarkup = ''
+  for (const [path, id] of outlineMap.entries()) {
+    defsOutlinesMarkup += `<path id="${id}" d="${path}" />`
+  }
+
+  return {
+    viewport,
+    stageWidth,
+    stageHeight,
+    showBaseline,
+    strokeWeight,
+    includeMedianLayer,
+    idPrefix,
+    weightDelta,
+    weightFilterRadius,
+    weightFilterId,
+    strokeWeightFilter,
+    defsOutlinesMarkup,
+    outlineMap,
+    glyphs,
+    strokes,
+    connections
+  }
+}
+
+/**
+ * Renders a single frame from an already prepared scene at a specific timeline progress.
+ * Runs in under a millisecond by reading precomputed Float32Array samples without path parsing.
+ */
+export function renderSvgFrame(scene: PreparedRenderScene, progressMs: number = 0): string {
+  let defsContent = ''
+  let ghostLayerContent = ''
+  let inkLayerContent = ''
+  let medianLayerContent = ''
+
+  const filterAttr = scene.weightFilterRadius > 0 ? ` filter="url(#${scene.weightFilterId})"` : ''
+
+  for (const stroke of scene.strokes) {
+    let progress = 0
+    if (stroke.step) {
+      const duration = stroke.step.endMs - stroke.step.startMs
+      const t = progressMs - stroke.step.startMs
+      const linearT = clamp(duration > 0 ? t / duration : 0)
+      progress = linearT * linearT * (3 - 2 * linearT)
+    } else if (progressMs > 0) {
+      progress = 1
+    }
+    progress = Math.max(progress, getBridgeHandoffProgress(stroke.step, progressMs))
+    if (progress <= 0) {
+      defsContent += `
+        <mask id="${stroke.maskId}" maskUnits="userSpaceOnUse" maskContentUnits="userSpaceOnUse" x="${fmtNum(stroke.maskX)}" y="${fmtNum(stroke.maskY)}" width="${fmtNum(stroke.maskWidth)}" height="${fmtNum(stroke.maskHeight)}">
+          <rect class="mask-base" fill="#000" x="${fmtNum(stroke.maskX)}" y="${fmtNum(stroke.maskY)}" width="${fmtNum(stroke.maskWidth)}" height="${fmtNum(stroke.maskHeight)}" />
+          <g class="${stroke.isDot ? 'dot-mask-stamps' : 'body-mask-stamps'}" fill="#fff"></g>
+        </mask>
+      `
+      continue
+    }
+
+    const length = stroke.length
+    const spacing = stroke.spacing
+    const isDot = stroke.isDot
+    const brushProfile = stroke.brushProfile
+    const strokeWeight = scene.strokeWeight
+
+    const progressClipPolygon = isDot
+      ? getProgressClipPolygon(stroke.pathProps, length, progress)
+      : null
+    const activeCount = Math.min(stroke.fixedCount, Math.floor((length * progress) / spacing))
+    let fragments = ''
+
+    for (let i = 0; i <= activeCount; i++) {
+      const offset = i * 4
+      const clampedProg = stroke.samples[offset]
+      const px = stroke.samples[offset + 1]
+      const py = stroke.samples[offset + 2]
+      const angle = stroke.samples[offset + 3]
+
+      const { width, height } = getBrushSquareGeometry(stroke, clampedProg, scene.strokeWeight)
+
+      fragments += `<rect x="${fmtNum(-width / 2)}" y="${fmtNum(-height / 2)}" width="${fmtNum(width)}" height="${fmtNum(height)}" transform="translate(${fmtNum(px)} ${fmtNum(py)}) rotate(${fmtNum(angle)})" />`
+    }
+
+    const lastFixed = Math.min(1, (activeCount * spacing) / length)
+    if (progress > lastFixed) {
+      const clampedProg = clamp(progress)
+      const point = stroke.pathProps.getPointAtLength(length * clampedProg)
+      const halfWin = tangentWindow(brushProfile, isDot, length)
+      let t0 = clampedProg - halfWin
+      let t1 = clampedProg + halfWin
+      if (t0 < 0) {
+        t1 = Math.min(1, t1 - t0)
+        t0 = 0
+      } else if (t1 > 1) {
+        t0 = Math.max(0, t0 - (t1 - 1))
+        t1 = 1
+      }
+      const before = stroke.pathProps.getPointAtLength(length * t0)
+      const after = stroke.pathProps.getPointAtLength(length * t1)
+      const angle = Math.atan2(after.y - before.y, after.x - before.x) * (180 / Math.PI)
+      const { width, height } = getBrushSquareGeometry(stroke, clampedProg, scene.strokeWeight)
+
+      fragments += `<rect x="${fmtNum(-width / 2)}" y="${fmtNum(-height / 2)}" width="${fmtNum(width)}" height="${fmtNum(height)}" transform="translate(${fmtNum(point.x)} ${fmtNum(point.y)}) rotate(${fmtNum(angle)})" />`
+    }
+
+    if (stroke.continuousMask && progress > 0) {
+      const { height: brushHeight } = getBrushSquareGeometry(stroke, progress, strokeWeight)
+      const dashLength = Math.max(length * progress, 0.001)
+      fragments += `<path d="${stroke.medianPath}" fill="none" stroke="#fff" stroke-width="${fmtNum(brushHeight)}" stroke-linecap="butt" stroke-linejoin="round" stroke-dasharray="${dashLength} ${Math.max(length - dashLength, 0.001)}"></path>`
+    }
+
+    defsContent += `
+      ${
+        progressClipPolygon
+          ? `<clipPath id="${stroke.progressClipId}" clipPathUnits="userSpaceOnUse"><polygon points="${progressClipPolygon}"></polygon></clipPath>`
+          : ''
+      }
+      <mask id="${stroke.maskId}" maskUnits="userSpaceOnUse" maskContentUnits="userSpaceOnUse" x="${fmtNum(stroke.maskX)}" y="${fmtNum(stroke.maskY)}" width="${fmtNum(stroke.maskWidth)}" height="${fmtNum(stroke.maskHeight)}">
+        <rect class="mask-base" fill="#000" x="${fmtNum(stroke.maskX)}" y="${fmtNum(stroke.maskY)}" width="${fmtNum(stroke.maskWidth)}" height="${fmtNum(stroke.maskHeight)}" />
+        <g class="${isDot ? 'dot-mask-stamps' : 'body-mask-stamps'}" fill="#fff"${progressClipPolygon ? ` clip-path="url(#${stroke.progressClipId})"` : ''}>${fragments}</g>
+      </mask>
+    `
+  }
+
+  for (const glyph of scene.glyphs) {
+    if (!glyph.isSupported) {
+      if (glyph.unsupportedOutlineId) {
+        ghostLayerContent += `<g class="glyph-ghost unsupported" data-glyph-id="${glyph.glyphId}" transform="${glyph.glyphTransform}"><use href="#${glyph.unsupportedOutlineId}" xlink:href="#${glyph.unsupportedOutlineId}" class="ghost-outline unsupported"${filterAttr} /></g>`
+      }
+      continue
+    }
+
+    if (glyph.ghostOutlineIds.length > 0) {
+      ghostLayerContent += `<g class="glyph-ghost" data-glyph-id="${glyph.glyphId}" transform="${glyph.glyphTransform}">${glyph.ghostOutlineIds
+        .map((id) => `<use href="#${id}" xlink:href="#${id}" class="ghost-outline"${filterAttr} />`)
+        .join('')}</g>`
+    }
+
+    let glyphInk = ''
+    for (const sIdx of glyph.strokeIndices) {
+      const stroke = scene.strokes[sIdx]
+      // Keep the masked ink node mounted from the first frame. The live board
+      // incrementally fills these masks after mount; omitting the node at
+      // progress 0 leaves nothing for later mask stamps to reveal.
+      if (stroke.outlineIds.length > 0) {
+        glyphInk += stroke.outlineIds
           .map(
-            (strokeOutline) =>
-              `<path d="${strokeOutline}" class="ink-outline" mask="url(#${maskId})"${weightFilterRadius > 0 ? ` filter="url(#${weightFilterId})"` : ''} />`
+            (id) =>
+              `<use href="#${id}" xlink:href="#${id}" class="ink-outline" mask="url(#${stroke.maskId})"${filterAttr} />`
           )
           .join('')
       }
     }
 
-    // Shared masking for connected glyphs:
-    // If the next glyph touches this one, inject the next glyph's outline into this glyph's
-    // connecting stroke ink, masked by that connecting stroke's mask.
-    // The brush bleed naturally pre-reveals the overlapping connection zone, eliminating any visual gap/lag.
-    // Final ب owns and reveals its complete outline in its own stroke. Do not
-    // inject that same outline through the preceding connection mask, or the
-    // letter appears twice in connected words such as كب.
-    if (gIdx < composed.length - 1 && composed[gIdx + 1].glyphId !== 15) {
-      const nextGlyph = composed[gIdx + 1]
-      const bodyStrokes = strokes.filter(
-        (s) => !(s.isCandidateDot ?? (s.type === 'dot' || glyph.semanticRole === 'dot'))
-      )
-      const connectingStroke =
-        bodyStrokes.length > 0 ? bodyStrokes[bodyStrokes.length - 1] : strokes[strokes.length - 1]
-      const nextStrokes = nextGlyph.orderedStrokes || nextGlyph.definition?.strokes || []
-      const nextFirstStroke = nextStrokes[0]
-
-      if (connectingStroke && nextFirstStroke) {
-        let endPt = connectingStroke.endPoint
-        if (!endPt && connectingStroke.medianPath) {
-          try {
-            const p = new svgPathProperties(connectingStroke.medianPath)
-            endPt = p.getPointAtLength(p.getTotalLength())
-          } catch (err) {
-            throw new Error(
-              `[svg-renderer] Failed to calculate endPoint from medianPath for connecting stroke of glyph "${glyph.glyphName || glyph.glyphId}": ${err instanceof Error ? err.message : String(err)}`
-            )
-          }
-        }
-
-        let startPt = nextFirstStroke.startPoint
-        if (!startPt && nextFirstStroke.medianPath) {
-          try {
-            const p = new svgPathProperties(nextFirstStroke.medianPath)
-            startPt = p.getPointAtLength(0)
-          } catch (err) {
-            throw new Error(
-              `[svg-renderer] Failed to calculate startPoint from medianPath for first stroke of glyph "${nextGlyph.glyphName || nextGlyph.glyphId}": ${err instanceof Error ? err.message : String(err)}`
-            )
-          }
-        }
-
-        if (endPt && startPt) {
-          const ex = gx + endPt.x
-          const ey = gy + endPt.y
-          const sx = nextGlyph.glyphX + startPt.x
-          const sy = nextGlyph.glyphY + startPt.y
-          const dist = Math.hypot(ex - sx, ey - sy)
-
-          if (dist < CONNECTION_THRESHOLD_UNITS) {
-            const connStrokeOrder =
-              connectingStroke.order ??
-              (strokes.indexOf(connectingStroke) >= 0
-                ? strokes.indexOf(connectingStroke)
-                : strokes.length - 1)
-            const connMaskId = `${idPrefix}mask-g${gIdx}-s${connStrokeOrder}`
-            const nextOutlinePath = nextGlyph.definition?.outlinePath || ''
-
-            if (nextOutlinePath) {
-              const dx = nextGlyph.glyphX - gx
-              const dy = nextGlyph.glyphY - gy
-              glyphInkContent += `<g mask="url(#${connMaskId})"><path d="${nextOutlinePath}" class="ink-outline" transform="translate(${dx}, ${dy})"${weightFilterRadius > 0 ? ` filter="url(#${weightFilterId})"` : ''} /></g>`
-            }
-          }
-        }
+    for (const conn of scene.connections) {
+      if (conn.fromGlyphIndex === glyph.glyphIndex) {
+        glyphInk += `<g mask="url(#${conn.connMaskId})"><use href="#${conn.nextOutlineId}" xlink:href="#${conn.nextOutlineId}" class="ink-outline" transform="translate(${conn.dx}, ${conn.dy})"${filterAttr} /></g>`
       }
     }
 
-    if (glyphInkContent) {
-      inkLayerContent += `<g class="glyph-ink" data-glyph-id="${glyph.glyphId}" transform="${glyphTransform}">${glyphInkContent}</g>`
+    if (glyphInk) {
+      inkLayerContent += `<g class="glyph-ink" data-glyph-id="${glyph.glyphId}" transform="${glyph.glyphTransform}">${glyphInk}</g>`
     }
 
-    if (glyphMedianContent) {
-      medianLayerContent += `<g class="glyph-median" data-glyph-id="${glyph.glyphId}" transform="${glyphTransform}">${glyphMedianContent}</g>`
+    if (scene.includeMedianLayer && glyph.medianPaths.length > 0) {
+      const medPaths = glyph.medianPaths
+        .map((d) => `<path d="${d}" class="median-path" fill="none" />`)
+        .join('')
+      medianLayerContent += `<g class="glyph-median" data-glyph-id="${glyph.glyphId}" transform="${glyph.glyphTransform}">${medPaths}</g>`
     }
   }
 
-  return `<svg id="writing-stage" width="100%" height="100%" viewBox="0 0 ${stageWidth} ${stageHeight}" role="img">
+  const { scale, baselineY, tx } = scene.viewport
+  return `<svg id="writing-stage" width="100%" height="100%" viewBox="0 0 ${scene.stageWidth} ${scene.stageHeight}" role="img">
         <defs>
-          ${strokeWeightFilter}
+          ${scene.strokeWeightFilter}
+          ${scene.defsOutlinesMarkup}
           ${defsContent}
         </defs>
 
         <!-- Baseline -->
-        ${showBaseline ? `<line id="baseline" class="baseline" x1="58" x2="${stageWidth - 58}" y1="${baselineY}" y2="${baselineY}"></line>` : ''}
+        ${scene.showBaseline ? `<line id="baseline" class="baseline" x1="58" x2="${scene.stageWidth - 58}" y1="${baselineY}" y2="${baselineY}"></line>` : ''}
 
         <g id="word-group" transform="translate(${tx}, ${baselineY}) scale(${scale})">
         <g id="ghost-layer" class="outline-layer" aria-hidden="true">
@@ -886,9 +1097,24 @@ export function renderSvg(
           ${inkLayerContent}
         </g>
 
-        <g id="median-layer" aria-hidden="true">
-          ${medianLayerContent}
-        </g>
+        ${scene.includeMedianLayer ? `<g id="median-layer" aria-hidden="true">${medianLayerContent}</g>` : ''}
         </g>
       </svg>`
+}
+
+/**
+ * Phase 3 generic SVG renderer (compatibility wrapper).
+ * Consumes: ComposedGlyph[], timeline, progressMs, renderId, options, cachedScene.
+ * Produces: Generic, centered, layered, animated SVG markup.
+ */
+export function renderSvg(
+  composed: ComposedGlyph[],
+  timeline?: AnimationTimeline,
+  progressMs: number = 0,
+  renderId: string = '',
+  options?: RenderOptions,
+  cachedScene?: PreparedRenderScene
+): string {
+  const scene = cachedScene ?? prepareRenderScene(composed, timeline, renderId, options)
+  return renderSvgFrame(scene, progressMs)
 }

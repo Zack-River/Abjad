@@ -1,11 +1,12 @@
 import React, { useState, useEffect, useRef, useMemo } from 'react'
-import { Canvg } from 'canvg'
 import {
+  Check,
   Download,
   FolderOpen,
   Info,
   Maximize2,
   Minimize2,
+  Moon,
   MonitorPlay,
   Pause,
   Palette,
@@ -14,10 +15,21 @@ import {
   Repeat2,
   RotateCcw,
   Settings,
-  SkipForward
+  SkipForward,
+  Sun
 } from 'lucide-react'
 import TegakiBoard from './TegakiBoard'
-import { setupEngine, renderSvg, initHarfBuzz, harfbuzzService } from '../engine'
+import {
+  setupEngine,
+  renderSvg,
+  prepareRenderScene,
+  renderSvgFrame,
+  initHarfBuzz,
+  harfbuzzService,
+  getBridgeHandoffProgress,
+  getBrushSquareGeometry,
+  DEFAULT_STROKE_WEIGHT
+} from '../engine'
 
 function escapeHtml(value) {
   return String(value)
@@ -37,12 +49,28 @@ function safeDownloadName(value) {
   )
 }
 
+const RASTER_EXPORT_BACKGROUND = '#f3ece4'
+const RASTER_EXPORT_EDGE_BLUR = 0.35
+const HTML_EXPORT_FPS = 24
+const SHADOW_STYLES = Object.freeze({
+  default: { color: '#cbd5e1', opacity: 0.45 },
+  white: { color: '#ffffff', opacity: 0.2 }
+})
+
+function getShadowStyle(mode) {
+  return SHADOW_STYLES[mode] || SHADOW_STYLES.default
+}
+
 function formatDuration(ms) {
   if (!Number.isFinite(ms) || ms < 0) return '--:--'
   const totalSeconds = Math.max(0, Math.round(ms / 1000))
   const minutes = Math.floor(totalSeconds / 60)
   const seconds = totalSeconds % 60
   return `${String(minutes).padStart(2, '0')}:${String(seconds).padStart(2, '0')}`
+}
+
+function yieldToRenderer() {
+  return new Promise((resolve) => window.setTimeout(resolve, 0))
 }
 
 function downloadBlob(blob, fileName) {
@@ -54,20 +82,188 @@ function downloadBlob(blob, fileName) {
   window.setTimeout(() => URL.revokeObjectURL(url), 1000)
 }
 
-function buildStandaloneSvg(svgBody, strokeColor, width = 800, height = 380, raster = false) {
+function buildStandaloneSvg(
+  svgBody,
+  strokeColor,
+  width = 800,
+  height = 380,
+  raster = false,
+  shadowMode = 'default'
+) {
+  const shadowStyle = getShadowStyle(shadowMode)
   return `<?xml version="1.0" encoding="UTF-8"?>
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${width} ${height}" width="${width}" height="${height}">
+<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" viewBox="0 0 ${width} ${height}" width="${width}" height="${height}">
   <defs>
     <style>
       .baseline { stroke: rgba(15, 118, 110, 0.2); stroke-dasharray: 6 4; }
-      .ghost-outline { fill: #cbd5e1; opacity: 0.45; }
+      .ghost-outline { fill: ${shadowStyle.color}; opacity: ${shadowStyle.opacity}; }
       .ghost-outline.unsupported { fill: #94a3b8; opacity: 0.3; }
-      .ink-outline { fill: ${strokeColor};${raster ? '' : ' filter: drop-shadow(0 2px 4px rgba(15, 118, 110, 0.18));'} }
+      .ink-outline { fill: ${strokeColor};${raster ? ` filter: blur(${RASTER_EXPORT_EDGE_BLUR}px);` : ' filter: drop-shadow(0 2px 4px rgba(15, 118, 110, 0.18));'} }
       .median-path { display: none; }
     </style>
   </defs>
+  ${raster ? `<rect width="${width}" height="${height}" fill="${RASTER_EXPORT_BACKGROUND}"/>` : ''}
   ${svgBody.replace(/<svg[^>]*>/, '').replace(/<\/svg>$/, '')}
 </svg>`
+}
+
+function buildAnimatedHtml({ word, frameSvgs, durationMs, fps }) {
+  const escapedWord = escapeHtml(word)
+  const frameData = JSON.stringify(frameSvgs).replaceAll('<', '\\u003c')
+  const safeDurationMs = Math.max(1, Math.round(durationMs))
+  const safeFps = Math.max(1, Math.round(fps))
+  const durationLabel = (safeDurationMs / 1000).toFixed(1)
+
+  return `<!DOCTYPE html>
+<html lang="ar" dir="rtl">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>مخطط الخط العربي: ${escapedWord}</title>
+  <style>
+    :root { color-scheme: light; font-family: 'Noto Sans Arabic', 'Segoe UI', sans-serif; }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      min-height: 100vh;
+      padding: 1rem;
+      display: grid;
+      place-items: center;
+      background: #f8f6f0;
+      color: #1e293b;
+    }
+    .card {
+      width: min(900px, 100%);
+      padding: clamp(1rem, 4vw, 2rem);
+      border: 1px solid #e2e8f0;
+      border-radius: 16px;
+      background: #fff;
+      box-shadow: 0 10px 30px rgba(15, 23, 42, 0.08);
+    }
+    h1 { margin: 0 0 1rem; font-size: clamp(1.1rem, 2.5vw, 1.5rem); text-align: center; }
+    .stage {
+      width: 100%;
+      aspect-ratio: 800 / 380;
+      overflow: hidden;
+      border-radius: 12px;
+      background: #f3ece4;
+      box-shadow: inset 0 2px 8px rgba(0, 0, 0, 0.06);
+    }
+    .stage svg { display: block; width: 100%; height: 100%; }
+    .controls { display: flex; align-items: center; gap: 0.65rem; margin-top: 1rem; }
+    button {
+      min-height: 2.4rem;
+      padding: 0.5rem 0.9rem;
+      border: 1px solid #0d9488;
+      border-radius: 8px;
+      background: #0d9488;
+      color: #fff;
+      font: inherit;
+      font-weight: 800;
+      cursor: pointer;
+    }
+    button.secondary { border-color: #cbd5e1; background: #f8fafc; color: #334155; }
+    button:hover, button:focus-visible { filter: brightness(0.96); outline: 2px solid rgba(13, 148, 136, 0.25); outline-offset: 2px; }
+    .time { min-width: 7rem; color: #64748b; font: 700 0.8rem/1.2 ui-monospace, SFMono-Regular, Menlo, monospace; text-align: center; direction: ltr; }
+    input[type="range"] { flex: 1; min-width: 5rem; accent-color: #0d9488; cursor: pointer; }
+    .notice { margin: 0.8rem 0 0; color: #64748b; font-size: 0.8rem; text-align: center; }
+    @media (max-width: 560px) {
+      .controls { flex-wrap: wrap; justify-content: center; }
+      input[type="range"] { order: 3; flex-basis: 100%; }
+    }
+  </style>
+</head>
+<body>
+  <main class="card">
+    <h1>مخطط الخط العربي — ${escapedWord}</h1>
+    <div id="stage" class="stage" aria-label="Animated calligraphy preview"></div>
+    <div class="controls">
+      <button id="toggle" type="button">تشغيل</button>
+      <button id="restart" class="secondary" type="button">إعادة</button>
+      <input id="scrubber" type="range" min="0" max="${Math.max(0, frameSvgs.length - 1)}" value="0" step="1" aria-label="Animation position">
+      <span id="time" class="time">00:00 / 00:${durationLabel.padStart(4, '0')}</span>
+    </div>
+    <p class="notice">ملف HTML مستقل يعمل دون اتصال بالإنترنت.</p>
+  </main>
+  <script>
+    (() => {
+      const frames = ${frameData};
+      const fps = ${safeFps};
+      const durationMs = ${safeDurationMs};
+      const stage = document.getElementById('stage');
+      const toggle = document.getElementById('toggle');
+      const restart = document.getElementById('restart');
+      const scrubber = document.getElementById('scrubber');
+      const time = document.getElementById('time');
+      let frameIndex = 0;
+      let playing = false;
+      let animationFrame = 0;
+      let startedAt = 0;
+
+      const formatTime = (milliseconds) => {
+        const seconds = Math.max(0, Math.floor(milliseconds / 1000));
+        return String(Math.floor(seconds / 60)).padStart(2, '0') + ':' + String(seconds % 60).padStart(2, '0');
+      };
+
+      const updateTime = () => {
+        const currentMs = Math.min(durationMs, (frameIndex / Math.max(1, fps)) * 1000);
+        time.textContent = formatTime(currentMs) + ' / ' + formatTime(durationMs);
+        scrubber.value = String(frameIndex);
+      };
+
+      const showFrame = (nextIndex) => {
+        frameIndex = Math.max(0, Math.min(frames.length - 1, nextIndex));
+        stage.innerHTML = frames[frameIndex] || '';
+        updateTime();
+      };
+
+      const stop = () => {
+        playing = false;
+        cancelAnimationFrame(animationFrame);
+        toggle.textContent = frameIndex >= frames.length - 1 ? 'تشغيل من البداية' : 'تشغيل';
+      };
+
+      const tick = (now) => {
+        if (!playing) return;
+        const elapsed = now - startedAt;
+        const nextIndex = Math.min(frames.length - 1, Math.floor((elapsed / 1000) * fps));
+        showFrame(nextIndex);
+        if (nextIndex >= frames.length - 1 || elapsed >= durationMs) {
+          stop();
+          return;
+        }
+        animationFrame = requestAnimationFrame(tick);
+      };
+
+      const play = () => {
+        if (frameIndex >= frames.length - 1) showFrame(0);
+        playing = true;
+        toggle.textContent = 'إيقاف';
+        startedAt = performance.now() - (frameIndex / Math.max(1, fps)) * 1000;
+        cancelAnimationFrame(animationFrame);
+        animationFrame = requestAnimationFrame(tick);
+      };
+
+      toggle.addEventListener('click', () => (playing ? stop() : play()));
+      restart.addEventListener('click', () => {
+        stop();
+        showFrame(0);
+      });
+      scrubber.addEventListener('input', () => {
+        stop();
+        showFrame(Number(scrubber.value));
+      });
+      document.addEventListener('keydown', (event) => {
+        if (event.code !== 'Space' || event.target === scrubber) return;
+        event.preventDefault();
+        playing ? stop() : play();
+      });
+
+      showFrame(0);
+    })();
+  </script>
+</body>
+</html>`
 }
 
 function stripRasterFilters(svgMarkup) {
@@ -89,6 +285,8 @@ function nativeSvgToCanvas(svgMarkup, width, height) {
         reject(new Error('Canvas rendering is unavailable.'))
         return
       }
+      context.imageSmoothingEnabled = true
+      context.imageSmoothingQuality = 'high'
       context.clearRect(0, 0, width, height)
       context.drawImage(image, 0, 0, width, height)
       resolve(canvas)
@@ -135,6 +333,8 @@ async function svgToCanvas(
   const context = canvas.getContext('2d')
   if (!context) throw new Error('Canvas rendering is unavailable.')
 
+  context.imageSmoothingEnabled = true
+  context.imageSmoothingQuality = 'high'
   context.clearRect(0, 0, width, height)
 
   const rasterSvg = stripRasterFilters(svgMarkup)
@@ -145,6 +345,7 @@ async function svgToCanvas(
     // Fall through to the canonical mask renderer.
   }
 
+  const { Canvg } = await import('canvg')
   const renderer = await Canvg.fromString(context, rasterSvg, {
     ignoreAnimation: true,
     ignoreMouse: true
@@ -154,91 +355,249 @@ async function svgToCanvas(
   return canvas
 }
 
-function wait(ms) {
-  return new Promise((resolve) => window.setTimeout(resolve, ms))
+function rasterizeSvgNative(svgMarkup, ctx, width, height, img = new Image()) {
+  return new Promise((resolve, reject) => {
+    const blob = new Blob([svgMarkup], { type: 'image/svg+xml;charset=utf-8' })
+    const url = URL.createObjectURL(blob)
+    const cleanup = () => {
+      img.onload = null
+      img.onerror = null
+      img.src = ''
+      URL.revokeObjectURL(url)
+    }
+    img.onload = () => {
+      try {
+        ctx.imageSmoothingEnabled = true
+        ctx.imageSmoothingQuality = 'high'
+        ctx.clearRect(0, 0, width, height)
+        ctx.drawImage(img, 0, 0, width, height)
+        cleanup()
+        resolve()
+      } catch (error) {
+        cleanup()
+        reject(error)
+      }
+    }
+    img.onerror = () => {
+      cleanup()
+      reject(new Error('Native SVG rasterization failed.'))
+    }
+    img.src = url
+  })
 }
 
-async function recordAnimation(renderFrame, durationMs, fps, width, height, onProgress, isCancelled) {
-  const canvas = document.createElement('canvas')
-  canvas.width = width
-  canvas.height = height
-  // Request frames explicitly after each canonical SVG frame is painted. This
-  // prevents Chromium from dropping animation frames while SVG rasterization
-  // is still yielding control to the renderer.
-  const stream = canvas.captureStream(0)
-  const mimeType = MediaRecorder.isTypeSupported('video/webm;codecs=vp9')
-    ? 'video/webm;codecs=vp9'
-    : 'video/webm'
-  const recorder = new MediaRecorder(stream, {
-    mimeType,
-    videoBitsPerSecond: Math.max(4_000_000, Math.round(width * height * fps * 0.12))
+async function rasterizeSvgCanvg(CanvgClass, svgMarkup, ctx, width, height) {
+  ctx.imageSmoothingEnabled = true
+  ctx.imageSmoothingQuality = 'high'
+  ctx.clearRect(0, 0, width, height)
+  const renderer = await CanvgClass.fromString(ctx, svgMarkup, {
+    ignoreAnimation: true,
+    ignoreMouse: true
   })
-  const chunks = []
-  recorder.ondataavailable = (event) => {
-    if (event.data.size > 0) chunks.push(event.data)
+  await renderer.render()
+  renderer.stop()
+}
+
+function parseTranslate(transform) {
+  const match = String(transform).match(/translate\(\s*(-?\d+(?:\.\d+)?)\s*,\s*(-?\d+(?:\.\d+)?)\s*\)/)
+  return match ? { x: Number(match[1]), y: Number(match[2]) } : { x: 0, y: 0 }
+}
+
+function smoothProgress(progress) {
+  const value = Math.max(0, Math.min(1, progress))
+  return value * value * (3 - 2 * value)
+}
+
+function preparedStrokeProgress(stroke, progressMs) {
+  if (!stroke.step) return progressMs > 0 ? 1 : 0
+  const duration = stroke.step.endMs - stroke.step.startMs
+  const linear = Math.max(0, Math.min(1, duration > 0 ? (progressMs - stroke.step.startMs) / duration : 0))
+  return Math.max(smoothProgress(linear), getBridgeHandoffProgress(stroke.step, progressMs))
+}
+
+function addCanvasBrush(context, x, y, angle, width, height) {
+  context.save()
+  context.translate(x, y)
+  context.rotate((angle * Math.PI) / 180)
+  context.rect(-width / 2, -height / 2, width, height)
+  context.restore()
+}
+
+function clipDotProgress(context, stroke, progress) {
+  if (!stroke.isDot || progress <= 0 || progress >= 1 || !stroke.length) return
+  const point = stroke.pathProps.getPointAtLength(stroke.length * progress)
+  const halfWindow = Math.min(0.08, 6 / stroke.length)
+  let start = Math.max(0, progress - halfWindow)
+  let end = Math.min(1, progress + halfWindow)
+  if (progress < halfWindow) end = Math.min(1, end + (halfWindow - progress))
+  if (progress + halfWindow > 1) start = Math.max(0, start - (progress + halfWindow - 1))
+  const before = stroke.pathProps.getPointAtLength(stroke.length * start)
+  const after = stroke.pathProps.getPointAtLength(stroke.length * end)
+  const dx = after.x - before.x
+  const dy = after.y - before.y
+  const magnitude = Math.hypot(dx, dy)
+  if (!magnitude) return
+  const tangentX = dx / magnitude
+  const tangentY = dy / magnitude
+  const normalX = -tangentY
+  const normalY = tangentX
+  const extent = 10000
+  const x = point.x
+  const y = point.y
+  context.beginPath()
+  context.moveTo(x + normalX * extent, y + normalY * extent)
+  context.lineTo(x - normalX * extent, y - normalY * extent)
+  context.lineTo(x - tangentX * extent - normalX * extent, y - tangentY * extent - normalY * extent)
+  context.lineTo(x - tangentX * extent + normalX * extent, y - tangentY * extent + normalY * extent)
+  context.closePath()
+  context.clip()
+}
+
+/**
+ * Rasterizes the prepared scene without reparsing a full SVG for every frame.
+ * Path2D keeps the TrueType outlines intact while Canvas clips each outline
+ * with the same progressive brush stamps used by the canonical SVG renderer.
+ */
+function rasterizePreparedSceneToCanvas(
+  scene,
+  progressMs,
+  context,
+  width,
+  height,
+  strokeColor,
+  pathCache,
+  pixelScale = 1,
+  shadowMode = 'default'
+) {
+  const shadowStyle = getShadowStyle(shadowMode)
+  const outlinePaths = new Map()
+  for (const [path, id] of scene.outlineMap.entries()) {
+    if (!pathCache.has(id)) pathCache.set(id, new Path2D(path))
+    outlinePaths.set(id, pathCache.get(id))
   }
 
-  const stopped = new Promise((resolve, reject) => {
-    recorder.onerror = () => reject(new Error('Animation recording failed.'))
-    recorder.onstop = () => resolve(new Blob(chunks, { type: mimeType }))
-  })
+  context.clearRect(0, 0, width * pixelScale, height * pixelScale)
+  context.imageSmoothingEnabled = true
+  context.imageSmoothingQuality = 'high'
+  context.filter = 'none'
+  context.globalAlpha = 1
+  context.fillStyle = RASTER_EXPORT_BACKGROUND
+  context.fillRect(0, 0, width * pixelScale, height * pixelScale)
+  context.fillStyle = shadowStyle.color
+  context.globalAlpha = shadowStyle.opacity
 
-  recorder.start()
-  // Keep enough samples for short, accelerated exports so the final completed
-  // frame is recorded instead of jumping from an early partial frame to stop.
-  const frameCount = Math.max(12, Math.ceil((durationMs / 1000) * fps))
-  const context = canvas.getContext('2d')
-  if (!context) throw new Error('Canvas rendering is unavailable.')
+  const viewport = scene.viewport
+  context.save()
+  context.scale(pixelScale, pixelScale)
+  context.translate(viewport.tx, viewport.baselineY)
+  context.scale(viewport.scale, viewport.scale)
 
-  for (let index = 0; index < frameCount; index += 1) {
-    if (isCancelled?.()) {
-      recorder.stop()
-      await stopped
-      const error = new Error('Export cancelled.')
-      error.name = 'ExportCancelled'
-      throw error
+  for (const glyph of scene.glyphs) {
+    const position = parseTranslate(glyph.glyphTransform)
+    context.save()
+    context.translate(position.x, position.y)
+    if (!glyph.isSupported) {
+      context.globalAlpha = 0.3
+      const unsupportedPath = glyph.unsupportedOutlineId
+        ? outlinePaths.get(glyph.unsupportedOutlineId)
+        : null
+      if (unsupportedPath) context.fill(unsupportedPath)
+      context.globalAlpha = shadowStyle.opacity
+      context.restore()
+      continue
     }
-    const progressMs = index === frameCount - 1 ? durationMs : (index / (frameCount - 1)) * durationMs
-    const frame = await renderFrame(progressMs)
-    context.clearRect(0, 0, canvas.width, canvas.height)
-    context.drawImage(frame, 0, 0)
-    stream.getVideoTracks()[0]?.requestFrame?.()
-    onProgress?.((index + 1) / frameCount)
-    await wait(1000 / fps)
+    for (const outlineId of glyph.ghostOutlineIds) {
+      const path = outlinePaths.get(outlineId)
+      if (path) context.fill(path)
+    }
+    context.restore()
   }
 
-  if (isCancelled?.()) {
-    recorder.stop()
-    await stopped
-    const error = new Error('Export cancelled.')
-    error.name = 'ExportCancelled'
-    throw error
-  }
+  context.globalAlpha = 1
+  context.fillStyle = strokeColor
 
-  // Let MediaRecorder capture the completed final canvas state.
-  await wait(Math.max(80, 1000 / fps))
-  recorder.stop()
-  return stopped
+  for (const glyph of scene.glyphs) {
+    const position = parseTranslate(glyph.glyphTransform)
+    context.save()
+    context.translate(position.x, position.y)
+
+    for (const strokeIndex of glyph.strokeIndices) {
+      const stroke = scene.strokes[strokeIndex]
+      const progress = preparedStrokeProgress(stroke, progressMs)
+      if (progress <= 0) continue
+
+      const activeCount = Math.min(
+        stroke.fixedCount,
+        Math.floor((stroke.length * progress) / stroke.spacing)
+      )
+      context.save()
+      clipDotProgress(context, stroke, progress)
+      context.beginPath()
+
+      for (let index = 0; index <= activeCount; index++) {
+        const offset = index * 4
+        const geometry = getBrushSquareGeometry(stroke, stroke.samples[offset], scene.strokeWeight)
+        addCanvasBrush(
+          context,
+          stroke.samples[offset + 1],
+          stroke.samples[offset + 2],
+          stroke.samples[offset + 3],
+          geometry.width,
+          geometry.height
+        )
+      }
+
+      const lastFixed = Math.min(1, (activeCount * stroke.spacing) / stroke.length)
+      if (progress > lastFixed) {
+        const pointProgress = Math.max(0, Math.min(1, progress))
+        const point = stroke.pathProps.getPointAtLength(stroke.length * pointProgress)
+        const halfWindow = Math.min(stroke.isDot ? 0.08 : 0.014, (stroke.isDot ? 6 : 9) / stroke.length)
+        const before = stroke.pathProps.getPointAtLength(
+          stroke.length * Math.max(0, pointProgress - halfWindow)
+        )
+        const after = stroke.pathProps.getPointAtLength(
+          stroke.length * Math.min(1, pointProgress + halfWindow)
+        )
+        const angle = (Math.atan2(after.y - before.y, after.x - before.x) * 180) / Math.PI
+        const geometry = getBrushSquareGeometry(stroke, pointProgress, scene.strokeWeight)
+        addCanvasBrush(context, point.x, point.y, angle, geometry.width, geometry.height)
+      }
+
+      context.clip()
+      context.filter = `blur(${RASTER_EXPORT_EDGE_BLUR}px)`
+      for (const outlineId of stroke.outlineIds) {
+        const path = outlinePaths.get(outlineId)
+        if (path) context.fill(path)
+      }
+      for (const connection of scene.connections) {
+        if (connection.connMaskId !== stroke.maskId) continue
+        const path = outlinePaths.get(connection.nextOutlineId)
+        if (!path) continue
+        context.save()
+        context.translate(connection.dx, connection.dy)
+        context.fill(path)
+        context.restore()
+      }
+      context.restore()
+    }
+    context.restore()
+  }
+  context.restore()
 }
 
 const ANIMATED_EXPORT_SETTINGS = {
-  gif: { fps: 15, width: 640, height: 304, speed: 1 },
-  mp4: { fps: 30, width: 800, height: 380, speed: 1 }
+  gif: { fps: 24, width: 1280, height: 720, videoBitrate: 0 },
+  mp4: { fps: 30, width: 1280, height: 720, videoBitrate: 12_000_000 }
 }
 
 const EXPORT_RESOLUTIONS = [
-  { id: 'compact', label: 'مضغوط', width: 640, height: 304 },
-  { id: 'standard', label: 'قياسي', width: 800, height: 380 },
-  { id: 'high', label: 'عالٍ', width: 1280, height: 608 }
+  { id: 'p480', label: '480p', width: 854, height: 480, videoBitrate: 6_000_000 },
+  { id: 'p720', label: '720p', width: 1280, height: 720, videoBitrate: 12_000_000 },
+  { id: 'p1080', label: '1080p / FHD', width: 1920, height: 1080, videoBitrate: 20_000_000 }
 ]
 
-const EXPORT_SPEEDS = [
-  { value: 0.5, label: 'بطيء جدًا (0.5x)' },
-  { value: 0.75, label: 'بطيء (0.75x)' },
-  { value: 1, label: 'افتراضي (1x)' },
-  { value: 1.5, label: 'سريع (1.5x)' },
-  { value: 2, label: 'سريع جدًا (2x)' }
-]
+const PNG_EXPORT_RESOLUTION = { width: 1920, height: 1080 }
+
 import './StudioView.css'
 
 const COLOR_SWATCHES = [
@@ -289,21 +648,23 @@ function segmentArabicElements(value) {
   }))
 }
 
-export default function StudioView() {
+export default function StudioView({ theme = 'light', onToggleTheme }) {
   // Input state
   const [word, setWord] = useState('أبجد')
+  const [pendingWord, setPendingWord] = useState('أبجد')
   const [elementType, setElementType] = useState('word') // 'letter' | 'word'
   const [drawMode, setDrawMode] = useState('stroke') // 'stroke' | 'connect'
   const [speed, setSpeed] = useState('medium') // 'slow' | 'medium' | 'fast'
-  const [strokeWeight, setStrokeWeight] = useState(102)
-  const [letterQueue, setLetterQueue] = useState([])
+  const strokeWeight = DEFAULT_STROKE_WEIGHT
   const [activeLetterIndex, setActiveLetterIndex] = useState(0)
   const [strokeColor, setStrokeColor] = useState('#0f766e')
+  const [shadowMode, setShadowMode] = useState('default')
+  const shadowStyle = getShadowStyle(shadowMode)
   const [exportFormat, setExportFormat] = useState('html')
   const [animatedExportDialogOpen, setAnimatedExportDialogOpen] = useState(false)
   const [animatedExportConfig, setAnimatedExportConfig] = useState({
     resolution: 'standard',
-    speed: 1,
+    fps: 30,
     directory: '',
     filename: ''
   })
@@ -323,18 +684,31 @@ export default function StudioView() {
   const activeExportIdRef = useRef(null)
   const exportTimerRef = useRef(null)
 
-  const openAnimatedExportDialog = () => {
-    const defaults = ANIMATED_EXPORT_SETTINGS[exportFormat]
+  const applyPendingWord = () => {
+    const nextWord = pendingWord.trim()
+    if (!nextWord) return
+    setWord(nextWord)
+  }
+
+  const openAnimatedExportDialog = (format = exportFormat) => {
+    const defaults = ANIMATED_EXPORT_SETTINGS[format]
     const matchingResolution = EXPORT_RESOLUTIONS.find(
       (resolution) => resolution.width === defaults.width && resolution.height === defaults.height
     )
     setAnimatedExportConfig((state) => ({
       ...state,
       resolution: matchingResolution?.id || 'standard',
-      speed: defaults.speed,
-      filename: state.filename || `calligraphy-${safeDownloadName(word)}`
+      fps: defaults.fps,
+      filename: `calligraphy-${safeDownloadName(word)}`
     }))
     setAnimatedExportDialogOpen(true)
+  }
+
+  const selectExportFormat = (format) => {
+    setExportFormat(format)
+    if ((format === 'gif' || format === 'mp4') && !exportBusy) {
+      openAnimatedExportDialog(format)
+    }
   }
 
   const chooseExportDirectory = async () => {
@@ -367,12 +741,12 @@ export default function StudioView() {
     }
   }, [])
 
+  const letterQueue = useMemo(
+    () => (elementType === 'letter' ? segmentArabicElements(word) : []),
+    [word, elementType]
+  )
+
   useEffect(() => {
-    if (elementType === 'letter') {
-      setLetterQueue(segmentArabicElements(word))
-    } else {
-      setLetterQueue([])
-    }
     setActiveLetterIndex(0)
     setEngineState((state) => ({ ...state, isComplete: false, mode: 'idle', progressMs: 0 }))
   }, [word, elementType])
@@ -401,11 +775,29 @@ export default function StudioView() {
     }
   }, [speed, engineSetup])
 
-  // Subscribe to canonical AnimationEngine
+  const prevSemanticRef = useRef(null)
+
+  // Subscribe to canonical AnimationEngine (semantic state only, zero renders during visual progress ticks)
   useEffect(() => {
     setShowFullPreview(false)
+    prevSemanticRef.current = null
     const unsub = engineSetup.engine.subscribe((st) => {
-      setEngineState(st)
+      const prev = prevSemanticRef.current
+      if (
+        !prev ||
+        prev.mode !== st.mode ||
+        prev.isPaused !== st.isPaused ||
+        prev.isComplete !== st.isComplete ||
+        prev.currentStep !== st.currentStep
+      ) {
+        prevSemanticRef.current = {
+          mode: st.mode,
+          isPaused: st.isPaused,
+          isComplete: st.isComplete,
+          currentStep: st.currentStep
+        }
+        setEngineState(st)
+      }
     })
 
     return () => {
@@ -458,6 +850,16 @@ export default function StudioView() {
     } else {
       if (showFullPreview) {
         setShowFullPreview(false)
+        engineSetup.engine.reset()
+      }
+
+      // Send a distinct reset notification before replaying a completed
+      // timeline so the live SVG adapter clears its masks and stroke cursor.
+      const currentEngineState = engineSetup.engine.getState()
+      if (
+        currentEngineState.isComplete ||
+        currentEngineState.progressMs >= currentEngineState.durationMs
+      ) {
         engineSetup.engine.reset()
       }
       engineSetup.engine.play()
@@ -520,19 +922,27 @@ export default function StudioView() {
     }
   }
 
-  const handleCancelExport = async () => {
+  const handleCancelExport = () => {
     if (!exportBusy) return
     exportCancelledRef.current = true
     const exportId = activeExportIdRef.current
-    if (exportId && window.api?.cancelMediaExport) {
-      await window.api.cancelMediaExport(exportId).catch(() => false)
-    }
+
+    // Update the UI immediately. Do not make the cancel button wait for the
+    // encoder process or filesystem cleanup to finish.
     setExportStatus('تم إلغاء التصدير')
     setExportProgress((state) => ({
       ...state,
       stage: 'جارٍ إلغاء التصدير',
       detail: 'إيقاف الإطارات أو محول الوسائط...'
     }))
+
+    if (exportId) {
+      if (window.api?.cancelExportStream) {
+        void window.api.cancelExportStream(exportId).catch(() => false)
+      } else if (window.api?.cancelMediaExport) {
+        void window.api.cancelMediaExport(exportId).catch(() => false)
+      }
+    }
   }
 
   // Export static snapshots and full canonical animation media.
@@ -556,7 +966,6 @@ export default function StudioView() {
     const animatedResolution = EXPORT_RESOLUTIONS.find(
       (resolution) => resolution.id === animatedExportConfig.resolution
     ) || EXPORT_RESOLUTIONS[1]
-    const animatedSpeed = Number(animatedExportConfig.speed) || 1
     if (
       (exportFormat === 'gif' || exportFormat === 'mp4') &&
       (!animatedExportConfig.directory || !animatedExportConfig.filename.trim())
@@ -601,8 +1010,9 @@ export default function StudioView() {
           strokeWeight
         }
       )
-      return buildStandaloneSvg(svgBody, strokeColor, width, height, raster)
+      return buildStandaloneSvg(svgBody, strokeColor, width, height, raster, shadowMode)
     }
+    const totalDurationMs = Math.max(engineSetup.timeline.totalDurationMs || 1, 500)
 
     try {
       if (exportFormat === 'svg') {
@@ -612,136 +1022,304 @@ export default function StudioView() {
           `calligraphy-${downloadName}-snapshot.svg`
         )
       } else if (exportFormat === 'html') {
-        setExportProgress((state) => ({ ...state, percent: 55, stage: 'إنشاء ملف HTML' }))
-        const escapedWord = escapeHtml(word)
-        const svg = renderExportFrame(effectiveProgressMs)
-        const htmlContent = `<!DOCTYPE html>
-<html lang="ar" dir="rtl">
-<head><meta charset="utf-8"><title>لقطة الخط العربي: ${escapedWord}</title>
-<style>
-body { margin: 0; background: #f8f6f0; display: flex; align-items: center; justify-content: center; min-height: 100vh; font-family: 'Noto Sans Arabic', sans-serif; }
-.card { background: #fff; padding: 2rem; border-radius: 16px; box-shadow: 0 10px 30px rgba(0,0,0,0.08); width: 850px; text-align: center; }
-.snapshot-notice { font-size: 0.85rem; color: #64748b; margin-top: 1rem; }
-</style></head>
-<body><div class="card"><h2>لقطة الخط العربي — ${escapedWord}</h2>${svg}<p class="snapshot-notice">لقطة ثابتة مطابقة للحظة الحالية (${Math.round(effectiveProgressMs)}ms)</p></div></body>
-</html>`
+        const frameCount = Math.max(2, Math.ceil((totalDurationMs / 1000) * HTML_EXPORT_FPS) + 1)
+        const frameSvgs = []
+
+        setExportProgress((state) => ({
+          ...state,
+          percent: 8,
+          stage: 'إنشاء إطارات HTML المتحركة',
+          detail: `تحضير ${frameCount} إطاراً مستقلاً...`
+        }))
+
+        for (let frameIndex = 0; frameIndex < frameCount; frameIndex += 1) {
+          if (exportCancelledRef.current) {
+            const error = new Error('Export cancelled.')
+            error.name = 'ExportCancelled'
+            throw error
+          }
+
+          const progressMs =
+            frameIndex === frameCount - 1
+              ? totalDurationMs
+              : (frameIndex / (frameCount - 1)) * totalDurationMs
+          frameSvgs.push(renderExportFrame(progressMs))
+
+          if (frameIndex % 4 === 0 || frameIndex === frameCount - 1) {
+            setExportProgress((state) => ({
+              ...state,
+              percent: 8 + Math.round(((frameIndex + 1) / frameCount) * 72),
+              stage: 'إنشاء إطارات HTML المتحركة',
+              detail: `الإطار ${frameIndex + 1} من ${frameCount}`
+            }))
+            await yieldToRenderer()
+          }
+        }
+
+        setExportProgress((state) => ({ ...state, percent: 88, stage: 'تجميع ملف HTML' }))
+        const htmlContent = buildAnimatedHtml({
+          word,
+          frameSvgs,
+          durationMs: totalDurationMs,
+          fps: HTML_EXPORT_FPS
+        })
         downloadBlob(
           new Blob([htmlContent], { type: 'text/html;charset=utf-8' }),
-          `calligraphy-${downloadName}-snapshot.html`
+          `calligraphy-${downloadName}.html`
         )
       } else if (exportFormat === 'png') {
         setExportProgress((state) => ({ ...state, percent: 15, stage: 'تحويل SVG إلى صورة' }))
         setExportStatus('جارٍ إنشاء صورة PNG...')
         const canvas = await svgToCanvas(
-          renderExportFrame(effectiveProgressMs, 800, 380, true),
-          800,
-          380,
+          renderExportFrame(
+            effectiveProgressMs,
+            PNG_EXPORT_RESOLUTION.width,
+            PNG_EXPORT_RESOLUTION.height,
+            true
+          ),
+          PNG_EXPORT_RESOLUTION.width,
+          PNG_EXPORT_RESOLUTION.height,
           strokeColor,
           effectiveProgressMs > 0
         )
         setExportProgress((state) => ({ ...state, percent: 85, stage: 'ترميز صورة PNG' }))
         const blob = await new Promise((resolve) => canvas.toBlob(resolve, 'image/png'))
         if (!blob) throw new Error('PNG encoding failed.')
-        downloadBlob(blob, `calligraphy-${downloadName}-snapshot.png`)
+        downloadBlob(blob, `calligraphy-${downloadName}-1080p.png`)
       } else if (exportFormat === 'gif' || exportFormat === 'mp4') {
-        if (!window.api?.convertMedia) {
+        if (!window.api?.startExportStream && !window.api?.convertMedia) {
           throw new Error('تصدير GIF وMP4 متاح من تطبيق سطح المكتب فقط. افتح التطبيق عبر Electron ثم أعد المحاولة.')
         }
-        const baseDurationMs = Math.max(engineSetup.timeline.totalDurationMs || 1, 500)
-        const animationDurationMs = Math.max(250, Math.round(baseDurationMs / animatedSpeed))
-        const endHoldMs = 1500
-        const durationMs = animationDurationMs + endHoldMs
         const defaults = ANIMATED_EXPORT_SETTINGS[exportFormat]
         const settings = {
           ...defaults,
           ...animatedResolution,
-          speed: animatedSpeed
+          fps: Number(animatedExportConfig.fps) || defaults.fps
         }
-        setExportStatus(`جارٍ تسجيل حركة ${exportFormat.toUpperCase()}...`)
+        const width = Math.round(settings.width / 2) * 2
+        const height = Math.round(settings.height / 2) * 2
+        const fps = settings.fps
+
+        const animationDurationSec = totalDurationMs / 1000
+        const frameCount = Math.max(12, Math.ceil(animationDurationSec * fps))
+
+        setExportStatus(`جارٍ بدء تصدير ${exportFormat.toUpperCase()}...`)
         setExportProgress((state) => ({
           ...state,
           percent: 5,
-          stage: 'رسم الإطارات',
-          detail: `0 من الإطارات`
+          stage: 'تهيئة محول الوسائط',
+          detail: 'بدء بث الإطارات...'
         }))
-        let renderedFrames = 0
-        const frameCount = Math.max(12, Math.ceil((durationMs / 1000) * settings.fps))
-        const webm = await recordAnimation(
-          async (progressMs) =>
-            svgToCanvas(
-              renderExportFrame(
-                Math.min(progressMs, animationDurationMs),
-                settings.width,
-                settings.height,
-                true
-              ),
-              settings.width,
-              settings.height,
-              strokeColor,
-              progressMs > 0
-            ),
-          durationMs,
-          settings.fps,
-          settings.width,
-          settings.height,
-          (frameProgress) => {
-            renderedFrames = Math.min(frameCount, Math.ceil(frameProgress * frameCount))
-            const elapsedMs = performance.now() - exportStartedAt
+
+        // Precompute canonical export render scene once
+        const preparedExportScene = prepareRenderScene(
+          engineSetup.glyphs,
+          engineSetup.timeline,
+          `export-${exportFormat}-${width}x${height}`,
+          {
+            stageWidth: width,
+            stageHeight: height,
+            showBaseline: false,
+            centerVertically: true,
+            strokeWeight,
+            includeMedianLayer: false
+          }
+        )
+
+        const exportId = activeExportIdRef.current
+        await window.api.startExportStream({
+          exportId,
+          format: exportFormat,
+          width,
+          height,
+          fps,
+          videoBitrate: settings.videoBitrate || animatedResolution.videoBitrate,
+          directory: animatedExportConfig.directory,
+          filename: animatedExportConfig.filename.trim(),
+          endHoldDurationSeconds: 1.5
+        })
+
+        // Reusable Canvas for offline frame rasterization
+        const exportCanvas = document.createElement('canvas')
+        exportCanvas.width = width
+        exportCanvas.height = height
+        const exportCtx = exportCanvas.getContext('2d', { willReadFrequently: true })
+        if (!exportCtx) throw new Error('Canvas rendering is unavailable.')
+
+        // Prefer the prepared Canvas compositor for animated exports. It keeps
+        // the TrueType paths and progressive masks but avoids decoding a full
+        // XML mask tree for every frame. SVG remains the fallback for engines
+        // without Path2D and for non-default outline morphology filters.
+        const canvasPathCache = new Map()
+        let useCanvasRaster =
+          typeof Path2D !== 'undefined' && preparedExportScene.weightFilterRadius === 0
+        let useCanvg = false
+        let rasterBackend = useCanvasRaster ? 'Canvas / Path2D' : 'SVG native'
+        const nativeRasterImage = new Image()
+        // The selected media resolution is already the final delivery size.
+        // Render and read from the same canvas so 1x exports cannot accidentally
+        // read a separate, untouched canvas.
+        const canvasPixelScale = 1
+
+        if (!useCanvasRaster) {
+          const frame0Svg = buildStandaloneSvg(
+            renderSvgFrame(preparedExportScene, 0),
+            strokeColor,
+            width,
+            height,
+            true,
+            shadowMode
+          )
+          try {
+            await rasterizeSvgNative(frame0Svg, exportCtx, width, height, nativeRasterImage)
+          } catch {
+            useCanvg = true
+            rasterBackend = 'Canvg fallback'
+          }
+        }
+        setExportProgress((state) => ({
+          ...state,
+          detail: `المعالج: ${rasterBackend}`
+        }))
+        let canvgClass = null
+        if (useCanvg) {
+          const { Canvg } = await import('canvg')
+          canvgClass = Canvg
+        }
+
+        let lastSvg = ''
+        let lastRawFrame = null
+        let lastProgressUpdate = performance.now()
+
+        // Offline direct frame rasterization & bounded streaming loop
+        for (let index = 0; index < frameCount; index++) {
+          // Give the renderer a macrotask boundary before each heavy frame so
+          // cancel clicks and window events can be delivered during export.
+          await yieldToRenderer()
+          if (exportCancelledRef.current) {
+            await window.api.cancelExportStream(exportId).catch(() => {})
+            const error = new Error('Export cancelled.')
+            error.name = 'ExportCancelled'
+            throw error
+          }
+
+          const timelineProgressMs =
+            index === frameCount - 1 ? totalDurationMs : (index / (frameCount - 1)) * totalDurationMs
+
+          const rawSvg = useCanvasRaster ? '' : renderSvgFrame(preparedExportScene, timelineProgressMs)
+          let frameBytes = null
+
+          if (!useCanvasRaster && rawSvg === lastSvg && lastRawFrame && lastRawFrame.byteLength > 0) {
+            // The transport may transfer its buffer, so keep the cache detached
+            // from the buffer handed to Electron.
+            frameBytes = lastRawFrame.slice()
+          } else {
+            if (useCanvasRaster) {
+              try {
+                rasterizePreparedSceneToCanvas(
+                  preparedExportScene,
+                  timelineProgressMs,
+                  exportCtx,
+                  width,
+                  height,
+                  strokeColor,
+                  canvasPathCache,
+                  canvasPixelScale,
+                  shadowMode
+                )
+              } catch {
+                // Path2D is supported by Chromium, but keep the existing SVG
+                // path as a defensive fallback for unusual path data.
+                useCanvasRaster = false
+                rasterBackend = 'SVG native'
+                const fallbackSvg = rawSvg || renderSvgFrame(preparedExportScene, timelineProgressMs)
+                const standaloneSvg = buildStandaloneSvg(
+                  fallbackSvg,
+                  strokeColor,
+                  width,
+                  height,
+                  true,
+                  shadowMode
+                )
+                try {
+                  await rasterizeSvgNative(
+                    standaloneSvg,
+                    exportCtx,
+                    width,
+                    height,
+                    nativeRasterImage
+                  )
+                } catch {
+                  useCanvg = true
+                  rasterBackend = 'Canvg fallback'
+                  const { Canvg } = await import('canvg')
+                  canvgClass = Canvg
+                  await rasterizeSvgCanvg(canvgClass, standaloneSvg, exportCtx, width, height)
+                }
+              }
+            } else if (!useCanvg) {
+              const standaloneSvg = buildStandaloneSvg(
+                rawSvg,
+                strokeColor,
+                width,
+                height,
+                true,
+                shadowMode
+              )
+              await rasterizeSvgNative(standaloneSvg, exportCtx, width, height, nativeRasterImage)
+            } else {
+              const standaloneSvg = buildStandaloneSvg(
+                rawSvg,
+                strokeColor,
+                width,
+                height,
+                true,
+                shadowMode
+              )
+              await rasterizeSvgCanvg(canvgClass, standaloneSvg, exportCtx, width, height)
+            }
+            const imgData = exportCtx.getImageData(0, 0, width, height)
+            frameBytes = new Uint8Array(imgData.data.buffer, imgData.data.byteOffset, imgData.data.byteLength)
+            lastSvg = rawSvg
+            lastRawFrame = frameBytes.slice()
+          }
+
+          // Stream to FFmpeg with backpressure
+          await window.api.writeExportFrame({
+            exportId,
+            frameData: frameBytes
+          })
+
+          const now = performance.now()
+          if (now - lastProgressUpdate > 100 || index === frameCount - 1) {
+            lastProgressUpdate = now
+            const frameProgress = (index + 1) / frameCount
+            const elapsedMs = now - exportStartedAt
             setExportProgress((state) => ({
               ...state,
-              percent: 5 + Math.round(frameProgress * 73),
-              stage: 'رسم الإطارات',
-              detail: `${renderedFrames} من ${frameCount} إطار`,
+              percent: 5 + Math.round(frameProgress * 80),
+              stage: 'رسم وبث الإطارات',
+              detail: `${index + 1} من ${frameCount} إطار · ${rasterBackend}`,
               elapsedMs,
               estimatedMs: frameProgress > 0 ? elapsedMs / frameProgress : null
             }))
-          },
-          () => exportCancelledRef.current
-        )
-        setExportStatus(`جارٍ تحويل الحركة إلى ${exportFormat.toUpperCase()}...`)
+          }
+        }
+
+        // Release the last frame references before waiting for FFmpeg to close.
+        lastSvg = ''
+        lastRawFrame = null
+
+        // Close stream & wait for FFmpeg to finish encoding & final hold
+        setExportStatus(`جارٍ إتمام وحفظ ملف ${exportFormat.toUpperCase()}...`)
         setExportProgress((state) => ({
           ...state,
-          percent: 80,
-          stage: 'تحويل الملف',
-          detail: 'بدء محول الوسائط'
+          percent: 88,
+          stage: 'إتمام ملف الوسائط',
+          detail: 'إغلاق البث وحفظ الإخراج...'
         }))
-        const removeMediaProgress = window.api.onMediaProgress((progress) => {
-          const elapsedMs = performance.now() - exportStartedAt
-          setExportProgress((state) => ({
-            ...state,
-            percent: 80 + Math.round(progress * 18),
-            stage: 'تحويل الملف',
-            detail: `${Math.round(progress * 100)}% من التحويل`,
-            elapsedMs,
-            estimatedMs: progress > 0 ? elapsedMs / ((80 + progress * 18) / 100) : null
-          }))
-        })
-        const converted = await window.api
-          .convertMedia(
-            await webm.arrayBuffer(),
-            exportFormat,
-            durationMs,
-            activeExportIdRef.current,
-            settings
-          )
-          .finally(removeMediaProgress)
-        const bytes =
-          converted instanceof Uint8Array
-            ? converted
-            : converted && typeof converted === 'object' && 'data' in converted
-              ? new Uint8Array(converted.data)
-              : new Uint8Array(converted)
-        const mime = exportFormat === 'gif' ? 'image/gif' : 'video/mp4'
-        if (window.api?.saveExportFile) {
-          await window.api.saveExportFile(
-            bytes,
-            animatedExportConfig.directory,
-            animatedExportConfig.filename.trim(),
-            exportFormat
-          )
-        } else {
-          downloadBlob(new Blob([bytes], { type: mime }), `${animatedExportConfig.filename.trim()}.${exportFormat}`)
-        }
+
+        await window.api.finishExportStream({ exportId })
       }
       setExportStatus('تم التصدير بنجاح')
       setExportProgress((state) => ({
@@ -758,6 +1336,10 @@ body { margin: 0; background: #f8f6f0; display: flex; align-items: center; justi
       console.error('Export failed:', error)
       setExportStatus('فشل التصدير')
       const cancelled = exportCancelledRef.current || error?.name === 'ExportCancelled'
+      const failedExportId = activeExportIdRef.current
+      if (!cancelled && failedExportId && window.api?.cancelExportStream) {
+        void window.api.cancelExportStream(failedExportId).catch(() => false)
+      }
       setExportProgress((state) => ({
         ...state,
         open: true,
@@ -799,27 +1381,43 @@ body { margin: 0; background: #f8f6f0; display: flex; align-items: center; justi
                 <h2>لوحة العرض التفاعلية</h2>
               </div>
 
-              {isFullscreen ? (
+              <div style={{ display: 'flex', gap: '0.5rem', flexWrap: 'wrap', justifyContent: 'flex-end' }}>
                 <button
                   type="button"
-                  className="fullscreen-btn fullscreen-exit-btn"
-                  onClick={toggleFullscreen}
-                  title="الخروج من العرض الكامل"
+                  className="theme-toggle"
+                  onClick={onToggleTheme}
+                  title={theme === 'dark' ? 'Switch to light mode' : 'Switch to dark mode'}
+                  aria-label={theme === 'dark' ? 'Switch to light mode' : 'Switch to dark mode'}
+                  aria-pressed={theme === 'dark'}
                 >
-                  <Minimize2 className="fs-icon" size={16} strokeWidth={2.2} aria-hidden="true" />
-                  <span>خروج</span>
+                  {theme === 'dark' ? (
+                    <Sun size={16} strokeWidth={2.2} aria-hidden="true" />
+                  ) : (
+                    <Moon size={16} strokeWidth={2.2} aria-hidden="true" />
+                  )}
                 </button>
-              ) : (
-                <button
-                  type="button"
-                  className="fullscreen-btn"
-                  onClick={toggleFullscreen}
-                  title="ملء الشاشة"
-                >
-                  <Maximize2 className="fs-icon" size={16} strokeWidth={2.2} aria-hidden="true" />
-                  <span>تكبير الشاشة</span>
-                </button>
-              )}
+                {isFullscreen ? (
+                  <button
+                    type="button"
+                    className="fullscreen-btn fullscreen-exit-btn"
+                    onClick={toggleFullscreen}
+                    title="الخروج من العرض الكامل"
+                  >
+                    <Minimize2 className="fs-icon" size={16} strokeWidth={2.2} aria-hidden="true" />
+                    <span>خروج</span>
+                  </button>
+                ) : (
+                  <button
+                    type="button"
+                    className="fullscreen-btn"
+                    onClick={toggleFullscreen}
+                    title="ملء الشاشة"
+                  >
+                    <Maximize2 className="fs-icon" size={16} strokeWidth={2.2} aria-hidden="true" />
+                    <span>تكبير الشاشة</span>
+                  </button>
+                )}
+              </div>
             </div>
 
             {/* Tegaki Generator Board Viewport */}
@@ -828,7 +1426,10 @@ body { margin: 0; background: #f8f6f0; display: flex; align-items: center; justi
                 <TegakiBoard
                   engineSetup={engineSetup}
                   progressMs={effectiveProgressMs}
+                  showFullPreview={showFullPreview}
                   strokeColor={strokeColor}
+                  shadowColor={shadowStyle.color}
+                  shadowOpacity={shadowStyle.opacity}
                   showShadowLayer={true}
                   showTrackingCursor={true}
                   showBaseline={false}
@@ -946,28 +1547,45 @@ body { margin: 0; background: #f8f6f0; display: flex; align-items: center; justi
             </div>
 
             {/* Text Input */}
-            <div className="input-group">
+            <form
+              className="input-group"
+              onSubmit={(event) => {
+                event.preventDefault()
+                applyPendingWord()
+              }}
+            >
               <label htmlFor="arabic-text-input" className="input-label">
                 اكتب حرفاً أو كلمة
               </label>
-              <div className="input-wrapper">
-                <input
-                  id="arabic-text-input"
-                  type="text"
-                  className="arabic-input"
-                  value={word}
-                  onChange={(e) => setWord(e.target.value)}
-                  placeholder="اكتب هنا..."
-                  dir="rtl"
-                />
-                <Pencil
-                  className="input-pencil-icon"
-                  size={18}
-                  strokeWidth={2.1}
-                  aria-hidden="true"
-                />
+              <div className="input-action-row">
+                <div className="input-wrapper">
+                  <input
+                    id="arabic-text-input"
+                    type="text"
+                    className="arabic-input"
+                    value={pendingWord}
+                    onChange={(e) => setPendingWord(e.target.value)}
+                    placeholder="اكتب هنا..."
+                    dir="rtl"
+                  />
+                  <Pencil
+                    className="input-pencil-icon"
+                    size={18}
+                    strokeWidth={2.1}
+                    aria-hidden="true"
+                  />
+                </div>
+                <button
+                  type="submit"
+                  className="apply-word-btn"
+                  disabled={!pendingWord.trim()}
+                  title="تطبيق النص وبدء تجهيز الرسم"
+                >
+                  <Check size={17} strokeWidth={2.4} aria-hidden="true" />
+                  <span>تطبيق</span>
+                </button>
               </div>
-            </div>
+            </form>
 
             {/* Setting: Element Type */}
             <div className="setting-row">
@@ -1054,28 +1672,6 @@ body { margin: 0; background: #f8f6f0; display: flex; align-items: center; justi
               </div>
             </div>
 
-            {/* Setting: Stroke Thickness (Locked to true TrueType glyph geometry) */}
-            <div className="setting-row">
-              <div style={{ display: 'flex', flexDirection: 'column' }}>
-                <span className="setting-label">سماكة الخط</span>
-                <span style={{ fontSize: '0.72rem', color: '#64748b' }}>
-                  تتحكم في طبقة الظل والحبر المرسوم
-                </span>
-              </div>
-              <div className="slider-wrapper">
-                <input
-                  type="range"
-                  min="94"
-                  max="110"
-                  step="2"
-                  value={strokeWeight}
-                  onChange={(event) => setStrokeWeight(Number(event.target.value))}
-                  title="ضبط سماكة طبقة الظل والحبر"
-                  className="thickness-slider"
-                />
-              </div>
-            </div>
-
             {/* Setting: Stroke Color */}
             <div className="setting-row">
               <span className="setting-label">لون الخط</span>
@@ -1098,15 +1694,44 @@ body { margin: 0; background: #f8f6f0; display: flex; align-items: center; justi
                 />
               </div>
             </div>
+
+            {/* Setting: Shadow Color */}
+            <div className="setting-row">
+              <span className="setting-label">لون الظل</span>
+              <div className="segmented-toggle two-options">
+                <button
+                  type="button"
+                  className={`toggle-option ${shadowMode === 'default' ? 'selected' : ''}`}
+                  onClick={() => setShadowMode('default')}
+                  title="Use the default shadow color"
+                >
+                  <span className="shadow-option-swatch shadow-option-swatch-default" aria-hidden="true" />
+                  <span>الافتراضي</span>
+                </button>
+                <button
+                  type="button"
+                  className={`toggle-option ${shadowMode === 'white' ? 'selected' : ''}`}
+                  onClick={() => setShadowMode('white')}
+                  title="Use a low-opacity white shadow"
+                >
+                  <span className="shadow-option-swatch shadow-option-swatch-white" aria-hidden="true" />
+                  <span>أبيض خفيف</span>
+                </button>
+              </div>
+            </div>
           </div>
 
-          {/* Standalone Export Static Snapshot Card */}
+          {/* Standalone Export Card */}
           <div className="export-card">
             <div className="export-header">
               <div>
-                <h3 className="export-title">تصدير لقطة ثابتة</h3>
+                <h3 className="export-title">
+                  {exportFormat === 'html' ? 'تصدير ملف تفاعلي' : 'تصدير لقطة ثابتة'}
+                </h3>
                 <span className="export-description">
-                  لقطة هندسية من لحظة العرض الحالية ({Math.round(effectiveProgressMs)}ms)
+                  {exportFormat === 'html'
+                    ? 'ملف HTML مستقل يحتوي على حركة الرسم وأدوات التشغيل'
+                    : `لقطة هندسية من لحظة العرض الحالية (${Math.round(effectiveProgressMs)}ms)`}
                 </span>
               </div>
               <button
@@ -1116,7 +1741,9 @@ body { margin: 0; background: #f8f6f0; display: flex; align-items: center; justi
                 disabled={!exportReady || exportBusy}
                 title={
                   exportReady
-                    ? 'تحميل اللقطة الحالية'
+                    ? exportFormat === 'html'
+                      ? 'تحميل ملف HTML تفاعلي'
+                      : 'تحميل اللقطة الحالية'
                     : 'التصدير متاح فقط للنصوص ذات الهندسة الموثقة بالكامل'
                 }
               >
@@ -1136,18 +1763,18 @@ body { margin: 0; background: #f8f6f0; display: flex; align-items: center; justi
             )}
 
             <div className="export-grid">
-              {/* HTML Card (Static Snapshot) */}
+              {/* HTML Card (self-contained animation) */}
               <div
                 className={`export-tile ${exportFormat === 'html' ? 'selected' : ''}`}
-                onClick={() => setExportFormat('html')}
+                onClick={() => selectExportFormat('html')}
               >
                 <span className="tile-badge html-badge">HTML</span>
               </div>
 
-              {/* SVG Card (Static Snapshot) */}
+              {/* SVG Card (static snapshot) */}
               <div
                 className={`export-tile ${exportFormat === 'svg' ? 'selected' : ''}`}
-                onClick={() => setExportFormat('svg')}
+                onClick={() => selectExportFormat('svg')}
               >
                 <span className="tile-badge svg-badge">SVG</span>
               </div>
@@ -1155,7 +1782,7 @@ body { margin: 0; background: #f8f6f0; display: flex; align-items: center; justi
               {/* PNG Card */}
               <div
                 className={`export-tile ${exportFormat === 'png' ? 'selected' : ''}`}
-                onClick={() => setExportFormat('png')}
+                onClick={() => selectExportFormat('png')}
               >
                 <span className="tile-badge png-badge">PNG</span>
               </div>
@@ -1163,7 +1790,7 @@ body { margin: 0; background: #f8f6f0; display: flex; align-items: center; justi
               {/* GIF Card */}
               <div
                 className={`export-tile ${exportFormat === 'gif' ? 'selected' : ''}`}
-                onClick={() => setExportFormat('gif')}
+                onClick={() => selectExportFormat('gif')}
               >
                 <span className="tile-badge gif-badge">GIF</span>
               </div>
@@ -1171,7 +1798,7 @@ body { margin: 0; background: #f8f6f0; display: flex; align-items: center; justi
               {/* MP4 Card */}
               <div
                 className={`export-tile ${exportFormat === 'mp4' ? 'selected' : ''}`}
-                onClick={() => setExportFormat('mp4')}
+                onClick={() => selectExportFormat('mp4')}
               >
                 <span className="tile-badge mp4-badge">MP4</span>
               </div>
@@ -1232,18 +1859,22 @@ body { margin: 0; background: #f8f6f0; display: flex; align-items: center; justi
               </label>
 
               <label className="animated-export-field">
-                <span>سرعة العرض</span>
+                <span>معدل الإطارات</span>
                 <select
-                  value={animatedExportConfig.speed}
+                  value={animatedExportConfig.fps}
                   onChange={(event) =>
-                    setAnimatedExportConfig((state) => ({ ...state, speed: Number(event.target.value) }))
+                    setAnimatedExportConfig((state) => ({ ...state, fps: Number(event.target.value) }))
                   }
                 >
-                  {EXPORT_SPEEDS.map((speedOption) => (
-                    <option key={speedOption.value} value={speedOption.value}>
-                      {speedOption.label}
-                    </option>
-                  ))}
+                  {(() => {
+                    const baseFps = ANIMATED_EXPORT_SETTINGS[exportFormat]?.fps || 30
+                    const options = [baseFps, Math.max(1, Math.floor(baseFps / 2))]
+                    return options.map((fpsOption, index) => (
+                      <option key={fpsOption} value={fpsOption}>
+                        {index === 0 ? `الحالي — ${fpsOption} FPS` : `النصف — ${fpsOption} FPS`}
+                      </option>
+                    ))
+                  })()}
                 </select>
               </label>
 

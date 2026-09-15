@@ -1,3 +1,5 @@
+import { canonicalDotOutlineAt } from './canonical-stroke-paths'
+
 export interface Point2D {
   x: number
   y: number
@@ -34,25 +36,76 @@ export interface StrokeItem {
   pointsWithWidth: PointWithWidth[]
 }
 
+/**
+ * Order dot marks using the educational sweep: bottom-right, top-center,
+ * bottom-left for three dots. Two-dot groups use bottom before top.
+ */
+export function orderDotItems<T>(items: T[], getPoint: (item: T) => Point2D | null): T[] {
+  const positioned = items.map((item, index) => ({ item, index, point: getPoint(item) }))
+  const fallbackPoint = { x: 0, y: 0 }
+  const pointOf = (entry: (typeof positioned)[number]) => entry.point || fallbackPoint
+
+  if (positioned.length === 3) {
+    const centerX = positioned.reduce((sum, entry) => sum + pointOf(entry).x, 0) / 3
+    const topIndex = positioned.reduce((best, entry, index, all) => {
+      const bestPoint = pointOf(all[best])
+      const point = pointOf(entry)
+      if (point.y < bestPoint.y) return index
+      if (point.y === bestPoint.y) {
+        return Math.abs(point.x - centerX) < Math.abs(bestPoint.x - centerX) ? index : best
+      }
+      return best
+    }, 0)
+    const top = positioned[topIndex]
+    const sides = positioned
+      .filter((_, index) => index !== topIndex)
+      .sort((a, b) => pointOf(b).x - pointOf(a).x)
+    return [sides[0], top, sides[1]].map((entry) => entry.item)
+  }
+
+  return positioned
+    .sort((a, b) => {
+      const pointA = pointOf(a)
+      const pointB = pointOf(b)
+      return pointB.y - pointA.y || pointB.x - pointA.x || a.index - b.index
+    })
+    .map((entry) => entry.item)
+}
+
+const outlineContourCache = new Map<string, string[]>()
+
 /** Keep independent TrueType contours independent during progressive masking. */
 export function splitOutlineContours(outlinePath?: string): string[] {
   if (!outlinePath) return []
+  const cached = outlineContourCache.get(outlinePath)
+  if (cached) return cached
   const contours = outlinePath.match(/M[^M]*/g) || []
-  return contours.length > 0 ? contours.map((contour) => contour.trim()) : [outlinePath]
+  const result = contours.length > 0 ? contours.map((contour) => contour.trim()) : [outlinePath]
+  outlineContourCache.set(outlinePath, result)
+  return result
 }
 
 export function assignOutlineComponents(strokes: StrokeItem[], outlinePath?: string): StrokeItem[] {
   const contours = splitOutlineContours(outlinePath)
 
-  // A single educational stroke owns every contour of its glyph. Preserve
-  // the existing fallback for multi-stroke glyphs until their verified
-  // component-to-stroke mapping is explicit.
-  if (contours.length <= 1 || strokes.length !== 1) return strokes
+  // A single educational stroke owns every contour of its glyph.
+  if (contours.length <= 1 || strokes.length === 1) {
+    if (contours.length <= 1 || strokes.length !== 1) return strokes
+    return strokes.map((stroke) => ({ ...stroke, outlinePaths: contours }))
+  }
 
-  return strokes.map((stroke) => ({
-    ...stroke,
-    outlinePaths: contours
-  }))
+  // When the font provides one contour per educational stroke, keep the
+  // components independent so a progressive mask cannot reveal a later
+  // contour through an earlier movement.
+  if (contours.length === strokes.length) {
+    return strokes.map((stroke, index) => ({
+      ...stroke,
+      outlinePath: contours[index],
+      outlinePaths: [contours[index]]
+    }))
+  }
+
+  return strokes
 }
 
 export function reverseStroke(s: StrokeItem): StrokeItem {
@@ -86,27 +139,75 @@ export function reverseStroke(s: StrokeItem): StrokeItem {
   }
 }
 
-function normalizeDotSweep(strokes: StrokeItem[]): StrokeItem[] {
-  const dotStrokes = strokes.filter((stroke) => stroke.isCandidateDot || stroke.type === 'dot')
-  if (dotStrokes.length === 0) return strokes
+function hasDrawableMedianPath(stroke: StrokeItem): boolean {
+  return /[LC]/.test(stroke.medianPath || '')
+}
 
-  const bodyStrokes = strokes.filter(
+function canonicalDotSweep(stroke: StrokeItem): StrokeItem {
+  const pathNumbers = [...(stroke.medianPath || '').matchAll(/-?\d+(?:\.\d+)?/g)].map((match) => Number(match[0]))
+  const points = stroke.pointsWithWidth || []
+  const sourceStart = stroke.startPoint || (points.length > 0 ? points[0] : null)
+  const sourceEnd = stroke.endPoint || (points.length > 1 ? points[points.length - 1] : null)
+  const hasDistinctEndpoints =
+    sourceStart &&
+    sourceEnd &&
+    (sourceStart.x !== sourceEnd.x || sourceStart.y !== sourceEnd.y)
+  const start = hasDistinctEndpoints
+    ? sourceStart
+    : pathNumbers.length >= 2
+      ? { x: pathNumbers[0], y: pathNumbers[1] }
+      : sourceStart
+  const end = hasDistinctEndpoints
+    ? sourceEnd
+    : pathNumbers.length >= 4
+      ? { x: pathNumbers[pathNumbers.length - 2], y: pathNumbers[pathNumbers.length - 1] }
+      : sourceEnd
+  if (!start || !end) return { ...stroke, direction: 'bottom_to_top' }
+
+  const center = { x: (start.x + end.x) / 2, y: (start.y + end.y) / 2 }
+  // The verified dot gesture uses a longer diagonal sweep so the dot fills
+  // progressively instead of reading as a thin line. Keep each dot centered
+  // on its authentic anchor while sharing the same educational motion.
+  const halfWidth = 20
+  const halfHeight = 41.1
+  const sweepStart = { x: center.x + halfWidth, y: center.y - halfHeight }
+  const sweepEnd = { x: center.x - halfWidth, y: center.y + halfHeight }
+  const width = points[0]?.width || 42
+  const sweepPoints: PointWithWidth[] = [
+    { ...sweepStart, t: 0, width },
+    { ...sweepEnd, t: 1, width }
+  ]
+
+  return {
+    ...stroke,
+    direction: 'bottom_to_top',
+    startPoint: sweepStart,
+    endPoint: sweepEnd,
+    points: [[sweepStart.x, sweepStart.y], [sweepEnd.x, sweepEnd.y]],
+    pointsWithWidth: sweepPoints,
+    medianPath: `M ${sweepStart.x.toFixed(1)} ${sweepStart.y.toFixed(1)} L ${sweepEnd.x.toFixed(1)} ${sweepEnd.y.toFixed(1)}`
+  }
+}
+
+function normalizeDotSweep(strokes: StrokeItem[]): StrokeItem[] {
+  const drawableStrokes = strokes.filter(hasDrawableMedianPath)
+  const dotStrokes = drawableStrokes.filter((stroke) => stroke.isCandidateDot || stroke.type === 'dot')
+  if (dotStrokes.length === 0) return drawableStrokes
+
+  const bodyStrokes = drawableStrokes.filter(
     (stroke) => !(stroke.isCandidateDot || stroke.type === 'dot')
   )
-  const orderedDots = dotStrokes
-    .slice()
-    .sort((a, b) => (b.startPoint?.x ?? 0) - (a.startPoint?.x ?? 0))
-    .map((stroke) => {
-      if (
-        stroke.startPoint &&
-        stroke.endPoint &&
-        stroke.startPoint.y < stroke.endPoint.y &&
-        stroke.pointsWithWidth.length >= 2
-      ) {
-        return { ...reverseStroke(stroke), direction: 'bottom_to_top' }
-      }
-      return { ...stroke, direction: 'bottom_to_top' }
-    })
+  const orderedDots = orderDotItems(dotStrokes, (stroke) => {
+    const start = stroke.startPoint || stroke.pointsWithWidth[0]
+    const end = stroke.endPoint || stroke.pointsWithWidth[stroke.pointsWithWidth.length - 1]
+    if (!start && !end) return null
+    const first = start || end!
+    const last = end || start!
+    return {
+      x: (first.x + last.x) / 2,
+      y: (first.y + last.y) / 2
+    }
+  }).map(canonicalDotSweep)
 
   return [...bodyStrokes, ...orderedDots].map((stroke, index) => ({
     ...stroke,
@@ -118,6 +219,7 @@ export interface NormalizationContext {
   char?: string
   id?: string
   word?: string
+  outlinePath?: string
 }
 
 export function normalizeLetterStrokes(
@@ -147,6 +249,12 @@ export function normalizeLetterStrokes(
     const dotStrokes = sourceStrokes
       .filter((s) => s.isCandidateDot)
       .sort((a, b) => (a.startPoint?.x ?? 0) - (b.startPoint?.x ?? 0))
+      .map((stroke) => {
+        const point = stroke.pointsWithWidth?.[0] || stroke.startPoint || stroke.endPoint
+        if (!point) return stroke
+        const outlinePath = canonicalDotOutlineAt(point)
+        return { ...stroke, outlinePath, outlinePaths: [outlinePath] }
+      })
     bodyStrokes.sort((a, b) => {
       const maxA = Math.max(...(a.points || []).map((p) => (Array.isArray(p) ? p[0] : 0)))
       const maxB = Math.max(...(b.points || []).map((p) => (Array.isArray(p) ? p[0] : 0)))
@@ -329,6 +437,7 @@ export function normalizeGlyphStrokes(
     char === 'ش'
   const isHamzaMark = char.includes('0654') || char.includes('0655')
   const isHamzaIsolated = char.includes('0621') || char === 'ء'
+  const isThreeDotGlyph = char.toLowerCase().includes('threedotsup')
 
   if (isHamzaMark && gStrokes.length >= 2) {
     const arc = gStrokes.find((s) => s.originalOrder === 1) || gStrokes[0]
@@ -376,6 +485,13 @@ export function normalizeGlyphStrokes(
       }
       gStrokes = [arc, line, ...others].filter((s): s is StrokeItem => !!s)
     }
+  } else if (isThreeDotGlyph) {
+    gStrokes = gStrokes.map((stroke) => {
+      const point = stroke.pointsWithWidth?.[0] || stroke.startPoint || stroke.endPoint
+      if (!point) return stroke
+      const outlinePath = canonicalDotOutlineAt(point)
+      return { ...stroke, outlinePath, outlinePaths: [outlinePath] }
+    })
   } else if (isSeenGlyph) {
     const body = gStrokes.filter((s) => !s.isCandidateDot)
     const dots = gStrokes
@@ -393,7 +509,7 @@ export function normalizeGlyphStrokes(
   // right-to-left connection, the top-to-bottom body, and the diagonal tail.
   if (char.includes('0644.medi.rlig') && gStrokes.length === 1) {
     const stroke = gStrokes[0]
-    const contours = splitOutlineContours(stroke.outlinePath)
+    const contours = splitOutlineContours(context.outlinePath || stroke.outlinePath)
     const verifiedPoints: PointWithWidth[] = [
       { x: 219.3, y: -40.1, width: 84 },
       { x: 129.2, y: -47, width: 84 },

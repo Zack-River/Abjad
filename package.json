@@ -18,7 +18,13 @@
     "build:win": "npm run build && electron-builder --win --publish never",
     "build:mac": "electron-vite build && electron-builder --mac --publish never",
     "build:linux": "electron-vite build && electron-builder --linux --publish never",
-    "typecheck": "npm run typecheck:node && npm run typecheck:web"
+    "typecheck": "npm run typecheck:node && npm run typecheck:web",
+    "test:performance": "node scripts/run-engine-script.mjs scripts/test-performance-regression.ts",
+    "test:continuity": "node scripts/run-engine-script.mjs scripts/test-cursive-continuity.ts",
+    "test:renderer": "node scripts/run-engine-script.mjs scripts/test-phase3-migration.ts",
+    "test:export": "node scripts/run-engine-script.mjs scripts/test-export-streaming.ts",
+    "benchmark:performance": "node scripts/run-engine-script.mjs scripts/benchmark-prepared.ts",
+    "benchmark:baseline": "node scripts/run-engine-script.mjs scripts/benchmark-baseline.ts"
   },
   "dependencies": {
     "@electron-toolkit/preload": "^3.0.2",

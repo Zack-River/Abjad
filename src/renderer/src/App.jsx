@@ -1,33 +1,32 @@
-import { lazy, Suspense, useState, useEffect } from 'react'
-import StudioView from './components/StudioView'
+import { lazy, Suspense, useEffect, useState } from 'react'
 import LicenseGate from './components/LicenseGate'
 import './App.css'
 
-const ComparisonGallery = lazy(() => import('./components/ComparisonGallery'))
+const StudioView = lazy(() => import('./components/StudioView'))
+
+const THEME_STORAGE_KEY = 'abjad-theme'
+
+function getInitialTheme() {
+  if (typeof window === 'undefined') return 'light'
+
+  return window.localStorage.getItem(THEME_STORAGE_KEY) === 'dark' ? 'dark' : 'light'
+}
 
 function App() {
-  // Support both direct URL route /dev/stroke-gallery and in-app dev toggle
-  const isDevRoute = () =>
-    typeof window !== 'undefined' &&
-    (window.location.pathname === '/dev/stroke-gallery' ||
-      window.location.hash.includes('stroke-gallery'))
-
-  const [currentView, setCurrentView] = useState(isDevRoute() ? 'gallery' : 'player')
   const [license, setLicense] = useState({ status: 'loading' })
+  const [theme, setTheme] = useState(getInitialTheme)
+
+  useEffect(() => {
+    document.documentElement.dataset.theme = theme
+    document.documentElement.style.colorScheme = theme
+    window.localStorage.setItem(THEME_STORAGE_KEY, theme)
+  }, [theme])
 
   useEffect(() => {
     window.api
       .getLicenseStatus()
       .then(setLicense)
       .catch(() => setLicense({ status: 'offline' }))
-  }, [])
-
-  useEffect(() => {
-    const handlePopState = () => {
-      setCurrentView(isDevRoute() ? 'gallery' : 'player')
-    }
-    window.addEventListener('popstate', handlePopState)
-    return () => window.removeEventListener('popstate', handlePopState)
   }, [])
 
   if (license.status === 'loading') {
@@ -38,22 +37,14 @@ function App() {
     return <LicenseGate status={license.status} onLicensed={setLicense} />
   }
 
-  const navigateToPlayer = () => {
-    if (window.history.pushState) {
-      window.history.pushState(null, '', '/')
-    }
-    setCurrentView('player')
-  }
-
-  if (currentView === 'gallery') {
-    return (
-      <Suspense fallback={<div className="route-loading">جاري تحميل أدوات التحقق...</div>}>
-        <ComparisonGallery onBackToPlayer={navigateToPlayer} />
-      </Suspense>
-    )
-  }
-
-  return <StudioView />
+  return (
+    <Suspense fallback={<div className="route-loading">جاري تحميل لوحة الخط...</div>}>
+      <StudioView
+        theme={theme}
+        onToggleTheme={() => setTheme((current) => (current === 'dark' ? 'light' : 'dark'))}
+      />
+    </Suspense>
+  )
 }
 
 export default App

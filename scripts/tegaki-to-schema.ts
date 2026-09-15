@@ -19,6 +19,7 @@ import type {
   ValidationStatus,
   VerifiedInventory
 } from './types'
+import { canonicalDotOutlineAt } from '../src/renderer/src/engine/data/canonical-stroke-paths'
 
 const MICRO_SPUR_THRESHOLD = 25 // in font units
 
@@ -1751,8 +1752,7 @@ export function generateIsolatedSheen(defaultSource: SourceMetadata): LetterEntr
     pointsWithWidth: [{ x: d.cx, y: d.cy, t: 0, width: 77.16 }]
   }))
 
-  const dotsOutline =
-    ' M 779.5 -507 L 811.5 -475 L 779.5 -443 L 747.5 -475 Z M 847.5 -617 L 879.5 -585 L 847.5 -553 L 815.5 -585 Z M 915.5 -507 L 947.5 -475 L 915.5 -443 L 883.5 -475 Z'
+  const dotsOutline = dotCoords.map(({ cx, cy }) => ` ${canonicalDotOutlineAt({ x: cx, y: cy })}`).join('')
 
   return {
     id: 'letter_ش',

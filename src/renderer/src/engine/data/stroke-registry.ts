@@ -21,8 +21,175 @@ import {
   normalizeGlyphStrokes,
   splitOutlineContours
 } from './stroke-normalizer'
+import {
+  CANONICAL_CONTEXTUAL_GLYPHS,
+  CANONICAL_HAMZA_PATH,
+  CANONICAL_KAF_PATHS,
+  CANONICAL_LETTER_PATHS,
+  CANONICAL_MARK_PATHS,
+  CANONICAL_MULTI_STROKE_LETTER_PATHS,
+  CANONICAL_RIGHT_JOINING_PATHS,
+  CANONICAL_STATIC_LETTER_PATHS,
+  CANONICAL_STATIC_LETTER_DIRECTIONS,
+  measureCanonicalPath
+} from './canonical-stroke-paths'
 
 export type { Point2D, PointWithWidth, StrokeItem }
+
+function canonicalBaaStroke(
+  medianPath: string,
+  direction: string = 'right_to_left',
+  type: string = 'main_body'
+): StrokeItem {
+  const metrics = measureCanonicalPath(medianPath)
+  const pointsWithWidth = metrics.points.map(([x, y], index) => ({
+    x,
+    y,
+    t: metrics.points.length > 1 ? index / (metrics.points.length - 1) : 0,
+    width: 42
+  }))
+
+  return {
+    order: 0,
+    originalOrder: 0,
+    priority: 0,
+    type,
+    direction,
+    length: metrics.length,
+    durationMs: metrics.length,
+    delayMs: 0,
+    startPoint: metrics.startPoint,
+    endPoint: metrics.endPoint,
+    medianPath,
+    points: metrics.points,
+    pointsWithWidth
+  }
+}
+
+function canonicalStrokeFromPath(
+  medianPath: string,
+  direction: string,
+  template: StrokeItem,
+  type = template.type || 'stroke'
+): StrokeItem {
+  const canonical = canonicalBaaStroke(medianPath, direction, type)
+  const width = template.pointsWithWidth?.[0]?.width ?? 42
+  return {
+    ...template,
+    ...canonical,
+    order: template.order,
+    originalOrder: template.originalOrder ?? template.order,
+    priority: template.priority,
+    type,
+    isCandidateDot: template.isCandidateDot,
+    delayMs: template.delayMs,
+    startPoint: canonical.startPoint,
+    endPoint: canonical.endPoint,
+    medianPath,
+    points: canonical.points,
+    pointsWithWidth: canonical.pointsWithWidth.map((point) => ({ ...point, width })),
+    outlinePath: template.outlinePath,
+    outlinePaths: template.outlinePaths
+  }
+}
+
+function pathCoordinateBounds(path?: string): { minX: number; maxX: number; minY: number; maxY: number } | null {
+  if (!path) return null
+  const values = [...path.matchAll(/-?\d+(?:\.\d+)?/g)].map((match) => Number(match[0]))
+  if (values.length < 2) return null
+  let minX = Infinity
+  let maxX = -Infinity
+  let minY = Infinity
+  let maxY = -Infinity
+  for (let index = 0; index + 1 < values.length; index += 2) {
+    minX = Math.min(minX, values[index])
+    maxX = Math.max(maxX, values[index])
+    minY = Math.min(minY, values[index + 1])
+    maxY = Math.max(maxY, values[index + 1])
+  }
+  return Number.isFinite(minX) && Number.isFinite(minY) ? { minX, maxX, minY, maxY } : null
+}
+
+function transformMedianPath(
+  medianPath: string,
+  source: { minX: number; maxX: number; minY: number; maxY: number },
+  target: { minX: number; maxX: number; minY: number; maxY: number }
+): string {
+  const sourceWidth = Math.max(1, source.maxX - source.minX)
+  const sourceHeight = Math.max(1, source.maxY - source.minY)
+  const scale = Math.min(
+    (target.maxX - target.minX) / sourceWidth,
+    (target.maxY - target.minY) / sourceHeight
+  )
+  if (!Number.isFinite(scale) || scale <= 0) return medianPath
+
+  const sourceCenterX = (source.minX + source.maxX) / 2
+  const sourceCenterY = (source.minY + source.maxY) / 2
+  const targetCenterX = (target.minX + target.maxX) / 2
+  const targetCenterY = (target.minY + target.maxY) / 2
+  const tokens = [...medianPath.matchAll(/([MLC])|(-?\d+(?:\.\d+)?)/g)].map((match) => match[0])
+  let command: string | null = null
+  let coordinateIndex = 0
+  const output: string[] = []
+
+  for (const token of tokens) {
+    if (/^[MLC]$/.test(token)) {
+      command = token
+      coordinateIndex = 0
+      output.push(token)
+      continue
+    }
+    if (!command) continue
+    const value = Number(token)
+    const center = coordinateIndex % 2 === 0 ? sourceCenterX : sourceCenterY
+    const targetCenter = coordinateIndex % 2 === 0 ? targetCenterX : targetCenterY
+    output.push(Number(((value - center) * scale + targetCenter).toFixed(2)).toString())
+    coordinateIndex += 1
+  }
+  return output.join(' ')
+}
+
+function translateMedianPath(medianPath: string, deltaX: number, deltaY: number): string {
+  const tokens = [...medianPath.matchAll(/([MLC])|(-?\d+(?:\.\d+)?)/g)].map((match) => match[0])
+  let command: string | null = null
+  let coordinateIndex = 0
+  const output: string[] = []
+
+  for (const token of tokens) {
+    if (/^[MLC]$/.test(token)) {
+      command = token
+      coordinateIndex = 0
+      output.push(token)
+      continue
+    }
+    if (!command) continue
+    const value = Number(token)
+    const translated = value + (coordinateIndex % 2 === 0 ? deltaX : deltaY)
+    output.push(Number(translated.toFixed(2)).toString())
+    coordinateIndex += 1
+  }
+  return output.join(' ')
+}
+
+function fitHamzaPathToOutline(medianPath: string, outlinePaths?: string[]): string {
+  const source = pathCoordinateBounds(medianPath)
+  const target = pathCoordinateBounds(outlinePaths?.filter(Boolean).join(' '))
+  return source && target ? transformMedianPath(medianPath, source, target) : medianPath
+}
+
+function canonicalStrokeSequence(
+  paths: readonly { medianPath: string; direction: string }[],
+  outlinePath: string
+): StrokeItem[] {
+  return paths.map((path, order) => ({
+    ...canonicalBaaStroke(path.medianPath, path.direction),
+    order,
+    originalOrder: order,
+    priority: order,
+    brushProfile: { continuousMask: 1, minorScale: 1.02 },
+    outlinePath
+  }))
+}
 
 export interface TrustedStrokeDefinition {
   id: string
@@ -90,6 +257,9 @@ const FINAL_LAM_STROKE: StrokeItem = {
   ]
 }
 
+const INITIAL_AIN_OUTLINE =
+  'M0 5L10-77Q73-77 107.50-78Q142-79 158-80.50Q174-82 180-82Q162-92 138-113.50Q114-135 96-168.50Q78-202 78-248Q78-305 104.50-348Q131-391 177.50-415Q224-439 284-439Q307-439 333-435Q359-431 383-423L366-346Q346-351 324-354Q302-357 284-357Q248-357 220-343.50Q192-330 176-306Q160-282 160-248Q160-222 171-200.50Q182-179 200-162Q218-145 240-134Q262-123 283.50-117Q305-111 322-112Q334-116 344-119Q354-122 366.50-126.50Q379-131 397.50-139Q416-147 445-160L473-87Q406-60 336.50-39Q267-18 185.50-6.50Q104 5 0 5'
+
 const MEDIAL_AIN_OUTLINE =
   'M0 5L10-77Q70-77 123-88.50Q176-100 220.50-119.50Q265-139 297-164.50Q329-190 346.50-217.50Q364-245 364-272Q364-285 355-298.50Q346-312 324-321Q303-330 267-330Q245-330 218-324Q191-318 166.50-307.50Q142-297 126-284Q153-262 176-241Q200-220 225-195.50Q250-171 279-140Q302-123 330.50-111Q359-99 392.50-91.50Q426-84 461-80.50Q496-77 531-77Q552-77 561.50-65.50Q571-54 571-38Q571-22 557-8.50Q543 5 521 5Q466 5 408.50-5.50Q351-16 301-37.50Q251-59 216-92Q199-114 178-136Q157-158 132.50-180.50Q108-203 80-223Q74-228 68-241Q62-254 58-268Q54-282 54-289Q54-304 73-325Q92-346 124-365.50Q156-385 197-398Q238-411 282-411Q339-411 374.50-394Q410-377 426.50-350.50Q443-324 443-294Q443-250 421-206.50Q399-163 358-125Q317-87 262-57.50Q207-28 140.50-11.50Q74 5 0 5'
 
@@ -138,6 +308,26 @@ const FINAL_KAF_OUTLINE =
 const INITIAL_KAF_OUTLINE =
   'M91 5L0 5L10-77L104-77Q163-77 197.5-83.5Q232-90 248.5-100.5Q265-111 270.5-123.5Q276-136 276-149Q276-172 258.5-206Q241-240 187-294Q159-322 131-345.5Q103-369 79.5-387.5Q56-406 42-419Q28-432 28-439Q28-454 30.5-468Q33-482 37.5-494Q42-506 49-513Q69-534 100.5-555Q132-576 174.5-599Q217-622 270.5-648.5Q324-675 388-707L422-633Q342-595 288.5-568.5Q235-542 198-521.5Q161-501 133-483Q105-465 76-443L91-481Q154-431 202.5-387Q251-343 284-302.5Q317-262 334-223Q351-184 351-144Q351-122 343-96Q335-70 309-47Q283-24 231-9.5Q179 5 91 5'
 
+function canonicalKafFinalStrokes(): StrokeItem[] {
+  const body = {
+    ...canonicalBaaStroke(CANONICAL_KAF_PATHS.finalBody, 'right_to_left', 'main_body'),
+    order: 0,
+    originalOrder: 0,
+    priority: 0,
+    outlinePath: FINAL_KAF_OUTLINE,
+    outlinePaths: [FINAL_KAF_OUTLINE]
+  }
+  const mark = {
+    ...canonicalBaaStroke(CANONICAL_KAF_PATHS.finalMark, 'right_to_left', 'main_body'),
+    order: 1,
+    originalOrder: 1,
+    priority: 1,
+    outlinePath: MINI_KEHEHAR_OUTLINE,
+    outlinePaths: [MINI_KEHEHAR_OUTLINE]
+  }
+  return [body, mark]
+}
+
 const FINAL_HEH_OUTLINE =
   'M486 5Q432 5 390.5-10.5Q349-26 324.5-63.5Q300-101 297-168L281-516L362-516L378-186Q381-139 395-115.5Q409-92 434.5-84.5Q460-77 496-77Q517-77 526.5-65.5Q536-54 536-38Q536-22 522-8.5Q508 5 486 5M327-182L335-105Q278-87 224-87Q170-87 126-103Q82-119 56-149.5Q30-180 30-223Q30-265 51.5-302Q73-339 110.5-368Q148-397 197.5-416.5Q247-436 303-443L317-359Q267-357 228.5-345.5Q190-334 163.5-316Q137-298 123-277Q109-256 109-236Q109-214 125-200Q141-186 166-178.5Q191-171 221-169.5Q251-168 279-171.5Q307-175 327-182'
 
@@ -160,6 +350,7 @@ const GHAIN_DOT_OUTLINE =
 // they still need canonical median paths so they can participate in animation
 // and mask coverage like every other shaped glyph.
 const DAGGER_ALIF_OUTLINE = 'M 110 -600 L 50 -600 L 50 -770 L 100 -770 Z'
+const SHORT_ALIF_OUTLINE = 'M170 0L89 0L72-644L153-644'
 const ALIF_WASLA_OUTLINE =
   'M170 0L89 0L72-644L153-644L170 0M130-731Q108-731 77.5-733Q47-735 20-738.5Q-7-742-21-744L-14-795Q1-793 26-790Q51-787 79-785Q107-783 130-783Q187-783 204.5-796Q222-809 222-828Q222-848 210-857Q198-866 183-866Q166-866 150-855.5Q134-845 119.5-825.5Q105-806 90-779L36-780Q50-811 70.5-843.5Q91-876 120-898Q149-920 187-920Q219-920 247.5-900Q276-880 276-833Q276-809 264-785.5Q252-762 220.5-746.5Q189-731 130-731'
 const WASLA_MARK_OUTLINE =
@@ -222,35 +413,7 @@ const FONT_CONTEXTUAL_STROKES: Record<number, StrokeItem | StrokeItem[]> = {
   },
   15: {
     ...FINAL_LAM_STROKE,
-    type: 'main_body',
-    direction: 'right_to_left',
-    medianPath:
-      'M 1131.7 -34.1 L 1008.9 -44.8 L 959.9 -66.2 L 935.4 -87.7 L 926.2 -139.7 L 939.1 -204.9 L 855.9 -133.6 L 745.7 -75.4 L 589.6 -35.6 L 476.3 -23.4 L 329.4 -23.4 L 185.5 -44.8 L 118.2 -81.5 L 81.5 -127.4 L 69.2 -194.8 L 75.3 -259.1 L 92.1 -325.1',
-    length: 1700,
-    startPoint: { x: 1131.7, y: -34.1 },
-    endPoint: { x: 92.1, y: -325.1 },
-    points: [
-      [1131.7, -34.1],
-      [1008.9, -44.8],
-      [926.2, -139.7],
-      [939.1, -204.9],
-      [745.7, -75.4],
-      [476.3, -23.4],
-      [185.5, -44.8],
-      [81.5, -127.4],
-      [75.3, -259.1],
-      [92.1, -325.1]
-    ],
-    pointsWithWidth: [
-      { x: 1131.7, y: -34.1, t: 0, width: 42 },
-      { x: 926.2, y: -139.7, t: 0.2, width: 42 },
-      { x: 939.1, y: -204.9, t: 0.28, width: 42 },
-      { x: 745.7, y: -75.4, t: 0.45, width: 42 },
-      { x: 476.3, y: -23.4, t: 0.62, width: 42 },
-      { x: 185.5, y: -44.8, t: 0.78, width: 42 },
-      { x: 75.3, y: -259.1, t: 0.94, width: 42 },
-      { x: 92.1, y: -325.1, t: 1, width: 42 }
-    ]
+    ...canonicalBaaStroke(CANONICAL_LETTER_PATHS.ب.final)
   },
   580: {
     ...FINAL_LAM_STROKE,
@@ -287,32 +450,8 @@ const FONT_CONTEXTUAL_STROKES: Record<number, StrokeItem | StrokeItem[]> = {
     ]
   },
   61: {
-    ...FINAL_LAM_STROKE,
-    type: 'main_body',
-    direction: 'right_to_left',
-    medianPath:
-      'M 381.7 -663.9 L 277.9 -613.4 C 211 -577.9, 178.2 -558.7, 75.7 -493.2 C 34.8 -471.3, 77.1 -422.1, 100.3 -424.8 C 99 -404.4, 155 -388, 231.5 -300.5 C 268.4 -258.2, 342.1 -191.2, 310.7 -129.8 C 291.6 -82, 284.8 -61.5, 200.1 -43.7 L 97.6 -36.9 L 7.4 -35.5',
+    ...canonicalBaaStroke(CANONICAL_KAF_PATHS.initial),
     outlinePath: INITIAL_KAF_OUTLINE,
-    length: 1320,
-    startPoint: { x: 381.7, y: -663.9 },
-    endPoint: { x: 7.4, y: -35.5 },
-    points: [
-      [381.7, -663.9],
-      [277.9, -613.4],
-      [75.7, -493.2],
-      [100.3, -424.8],
-      [231.5, -300.5],
-      [310.7, -129.8],
-      [200.1, -43.7],
-      [7.4, -35.5]
-    ],
-    pointsWithWidth: [
-      { x: 381.7, y: -663.9, t: 0, width: 42 },
-      { x: 75.7, y: -493.2, t: 0.35, width: 42 },
-      { x: 231.5, y: -300.5, t: 0.6, width: 42 },
-      { x: 310.7, y: -129.8, t: 0.78, width: 42 },
-      { x: 7.4, y: -35.5, t: 1, width: 42 }
-    ]
   },
   83: {
     ...FINAL_LAM_STROKE,
@@ -372,21 +511,10 @@ const FONT_CONTEXTUAL_STROKES: Record<number, StrokeItem | StrokeItem[]> = {
   },
   109: {
     ...FINAL_LAM_STROKE,
+    ...canonicalBaaStroke(CANONICAL_MARK_PATHS['ـ'].strokes[0].medianPath, CANONICAL_MARK_PATHS['ـ'].strokes[0].direction, 'main_body'),
     type: 'main_body',
     direction: 'right_to_left',
-    medianPath: 'M 280 -36 L 0 -36',
     outlinePath: TATWEEL_OUTLINE,
-    length: 280,
-    startPoint: { x: 280, y: -36 },
-    endPoint: { x: 0, y: -36 },
-    points: [
-      [280, -36],
-      [0, -36]
-    ],
-    pointsWithWidth: [
-      { x: 280, y: -36, t: 0, width: 42 },
-      { x: 0, y: -36, t: 1, width: 42 }
-    ]
   },
   409: {
     ...FINAL_LAM_STROKE,
@@ -488,245 +616,64 @@ const FONT_CONTEXTUAL_STROKES: Record<number, StrokeItem | StrokeItem[]> = {
     endPoint: { x: 0, y: -36 }
   },
   35: {
-    ...FINAL_LAM_STROKE,
-    brushProfile: { continuousMask: 1, minorScale: 1.02 },
-    medianPath:
-      'M 1269 -36 L 1180 -36 C 1140 -36, 1100 -120, 1100 -340 C 1090 -340, 1070 -130, 1040 -70 C 1010 -25, 960 -25, 910 -45 C 870 -65, 870 -160, 860 -265 C 850 -265, 820 -120, 790 -65 C 760 -25, 710 -25, 660 -45 C 620 -65, 590 -130, 550 -265 C 540 -265, 520 -100, 520 20 C 520 100, 450 185, 313 191 C 200 191, 100 140, 75 40 C 55 -30, 75 -110, 108 -160',
-    outlinePath: FINAL_SEEN_OUTLINE,
-    length: 2500,
-    startPoint: { x: 1269, y: -36 },
-    endPoint: { x: 108, y: -160 }
+    ...canonicalBaaStroke(CANONICAL_LETTER_PATHS.س.final),
+    outlinePath: FINAL_SEEN_OUTLINE
   },
   36: {
-    ...FINAL_LAM_STROKE,
-    brushProfile: { continuousMask: 1, minorScale: 1.02 },
-    medianPath:
-      'M 850 -36 L 760 -36 C 720 -36, 680 -120, 680 -340 C 670 -340, 650 -130, 620 -70 C 590 -25, 540 -25, 490 -45 C 450 -65, 450 -160, 440 -265 C 430 -265, 400 -120, 370 -65 C 340 -25, 290 -25, 240 -45 C 200 -65, 180 -150, 175 -260 C 165 -260, 140 -120, 110 -50 L 0 -36',
-    outlinePath: MEDIAL_SEEN_OUTLINE,
-    length: 1750,
-    startPoint: { x: 850, y: -36 },
-    endPoint: { x: 0, y: -36 }
+    ...canonicalBaaStroke(CANONICAL_LETTER_PATHS.س.medial),
+    outlinePath: MEDIAL_SEEN_OUTLINE
   },
   37: {
-    ...FINAL_LAM_STROKE,
-    brushProfile: { continuousMask: 1, minorScale: 1.02 },
-    medianPath:
-      'M 650 -390 C 690 -250, 680 -130, 650 -70 C 620 -30, 560 -25, 510 -45 C 470 -65, 450 -150, 440 -265 C 430 -265, 400 -120, 370 -65 C 340 -25, 290 -25, 240 -45 C 200 -65, 180 -150, 175 -260 C 165 -260, 140 -120, 110 -50 L 0 -36',
-    outlinePath: INITIAL_SEEN_OUTLINE,
-    length: 1550,
-    startPoint: { x: 650, y: -390 },
-    endPoint: { x: 0, y: -36 }
+    ...canonicalBaaStroke(CANONICAL_LETTER_PATHS.س.initial),
+    outlinePath: INITIAL_SEEN_OUTLINE
   },
   39: {
-    ...FINAL_LAM_STROKE,
+    ...canonicalBaaStroke(CANONICAL_LETTER_PATHS.ص.final),
     brushProfile: { continuousMask: 1, minorScale: 1.02 },
-    medianPath:
-      'M 1352 -36 L 1140 -36 C 950 -36, 800 -45, 713 -57 C 760 -120, 880 -270, 1000 -330 C 1050 -355, 1140 -355, 1190 -300 C 1240 -250, 1240 -160, 1180 -100 C 1120 -50, 1020 -40, 900 -36 L 650 -36 C 610 -36, 580 -90, 550 -265 C 540 -265, 520 -100, 520 20 C 520 100, 450 185, 313 191 C 200 191, 100 140, 75 40 C 55 -30, 75 -110, 108 -160',
-    outlinePath: FINAL_SAD_OUTLINE,
-    length: 2450,
-    startPoint: { x: 1352, y: -36 },
-    endPoint: { x: 108, y: -160 }
+    outlinePath: FINAL_SAD_OUTLINE
   },
   40: {
-    ...FINAL_LAM_STROKE,
+    ...canonicalBaaStroke(CANONICAL_LETTER_PATHS.ص.medial),
     brushProfile: { continuousMask: 1, minorScale: 1.02 },
-    medianPath:
-      'M 949 -36 L 740 -36 C 550 -36, 400 -45, 310 -57 C 360 -120, 480 -270, 600 -330 C 650 -355, 740 -355, 790 -300 C 840 -250, 840 -160, 780 -100 C 720 -50, 620 -40, 500 -36 L 270 -36 C 230 -36, 205 -90, 185 -240 C 175 -240, 150 -100, 130 -36 L 0 -36',
-    outlinePath: MEDIAL_SAD_OUTLINE,
-    length: 1850,
-    startPoint: { x: 949, y: -36 },
-    endPoint: { x: 0, y: -36 }
+    outlinePath: MEDIAL_SAD_OUTLINE
   },
   41: {
-    ...FINAL_LAM_STROKE,
+    ...canonicalBaaStroke(CANONICAL_LETTER_PATHS.ص.initial),
     brushProfile: { continuousMask: 1, minorScale: 1.02 },
-    medianPath:
-      'M 310 -57 C 360 -120, 480 -270, 600 -330 C 650 -355, 740 -355, 790 -300 C 840 -250, 840 -160, 780 -100 C 720 -50, 620 -40, 500 -36 L 270 -36 C 230 -36, 205 -90, 185 -240 C 175 -240, 150 -100, 130 -36 L 0 -36',
-    outlinePath: INITIAL_SAD_OUTLINE,
-    length: 1650,
-    startPoint: { x: 310, y: -57 },
-    endPoint: { x: 0, y: -36 }
+    outlinePath: INITIAL_SAD_OUTLINE
   },
-  43: [
-    {
-      ...FINAL_LAM_STROKE,
-      order: 0,
-      originalOrder: 0,
-      priority: 0,
-      type: 'main_body',
-      direction: 'right_to_left',
-      brushProfile: { continuousMask: 1, minorScale: 1.02 },
-      medianPath:
-        'M 77.1 -39.6 C 150 -120, 260 -260, 380 -330 C 430 -355, 520 -355, 570 -300 C 615 -250, 615 -160, 560 -100 C 510 -50, 420 -40, 300 -36 L 0 -36',
-      outlinePath: FINAL_TAH_OUTLINE,
-      length: 1400,
-      startPoint: { x: 77.1, y: -39.6 },
-      endPoint: { x: 0, y: -36 }
-    },
-    {
-      ...FINAL_LAM_STROKE,
-      order: 1,
-      originalOrder: 1,
-      priority: 1,
-      type: 'main_body',
-      direction: 'top_to_bottom',
-      brushProfile: { continuousMask: 1, minorScale: 1.02 },
-      medianPath: 'M 108.5 -709.1 L 120.8 -88.9',
-      outlinePath: FINAL_TAH_OUTLINE,
-      length: 570,
-      startPoint: { x: 108.5, y: -709.1 },
-      endPoint: { x: 120.8, y: -88.9 }
-    }
-  ],
-  44: [
-    {
-      ...FINAL_LAM_STROKE,
-      order: 0,
-      originalOrder: 0,
-      priority: 0,
-      type: 'main_body',
-      direction: 'right_to_left',
-      brushProfile: { continuousMask: 1, minorScale: 1.02 },
-      medianPath:
-        'M 736.9 -30.2 L 503.3 -65.7 C 320 -36, 180 -45, 64.8 -35.7 C 150 -120, 260 -260, 380 -330 C 430 -355, 520 -355, 570 -300 C 615 -250, 615 -160, 560 -100 C 510 -50, 420 -40, 300 -36 L 0 -36',
-      outlinePath: MEDIAL_TAH_OUTLINE,
-      length: 1350,
-      startPoint: { x: 736.9, y: -30.2 },
-      endPoint: { x: 0, y: -36 }
-    },
-    {
-      ...FINAL_LAM_STROKE,
-      order: 1,
-      originalOrder: 1,
-      priority: 1,
-      type: 'main_body',
-      direction: 'top_to_bottom',
-      brushProfile: { continuousMask: 1, minorScale: 1.02 },
-      medianPath: 'M 115 -690 L 125 -120',
-      outlinePath: MEDIAL_TAH_OUTLINE,
-      length: 570,
-      startPoint: { x: 115, y: -690 },
-      endPoint: { x: 125, y: -120 }
-    }
-  ],
-  45: [
-    {
-      ...FINAL_LAM_STROKE,
-      order: 0,
-      originalOrder: 0,
-      priority: 0,
-      type: 'main_body',
-      direction: 'right_to_left',
-      brushProfile: { continuousMask: 1, minorScale: 1.02 },
-      medianPath:
-        'M 95 -57 C 150 -120, 260 -260, 380 -330 C 430 -355, 520 -355, 570 -300 C 615 -250, 615 -160, 560 -100 C 510 -50, 420 -40, 300 -36 L 0 -36',
-      outlinePath: INITIAL_TAH_OUTLINE,
-      length: 1100,
-      startPoint: { x: 95, y: -57 },
-      endPoint: { x: 0, y: -36 }
-    },
-    {
-      ...FINAL_LAM_STROKE,
-      order: 1,
-      originalOrder: 1,
-      priority: 1,
-      type: 'main_body',
-      direction: 'top_to_bottom',
-      brushProfile: { continuousMask: 1, minorScale: 1.02 },
-      medianPath: 'M 115 -690 L 125 -120',
-      outlinePath: INITIAL_TAH_OUTLINE,
-      length: 570,
-      startPoint: { x: 115, y: -690 },
-      endPoint: { x: 125, y: -120 }
-    }
-  ],
+  43: canonicalStrokeSequence(CANONICAL_MULTI_STROKE_LETTER_PATHS.ط.final, FINAL_TAH_OUTLINE),
+  44: canonicalStrokeSequence(CANONICAL_MULTI_STROKE_LETTER_PATHS.ط.medial, MEDIAL_TAH_OUTLINE),
+  45: canonicalStrokeSequence(CANONICAL_MULTI_STROKE_LETTER_PATHS.ط.initial, INITIAL_TAH_OUTLINE),
   47: {
-    ...FINAL_LAM_STROKE,
-    medianPath:
-      'M 534 -37.1 L 352.1 -62 L 266.2 -117.4 L 95 -286.5 L 227.8 -379.6 L 389.1 -346.9 L 386.2 -209.8 L 129.1 -8.7 L 47.4 144.7 L 87.9 297.4 L 283.9 355 L 502 314.5',
+    ...canonicalBaaStroke(CANONICAL_LETTER_PATHS.ع.final, 'left_to_right'),
     outlinePath: FINAL_AIN_OUTLINE,
-    length: 1700,
-    direction: 'left_to_right',
-    startPoint: { x: 534, y: -37.1 },
-    endPoint: { x: 502, y: 314.5 }
+    brushProfile: { continuousMask: 1, minorScale: 1.02 }
   },
   48: {
-    ...FINAL_LAM_STROKE,
-    medianPath:
-      'M 529.3 -28.7 L 347.6 -64.2 L 215.1 -143.4 L 90.8 -254.1 L 103.1 -314.2 L 239.7 -382.5 L 383.1 -338.8 L 400.9 -240.4 L 358.5 -178.9 L 267 -102.4 L 44.3 -31.4',
+    ...canonicalBaaStroke(CANONICAL_LETTER_PATHS.ع.medial, 'left_to_right'),
     outlinePath: MEDIAL_AIN_OUTLINE,
-    length: 1550,
-    direction: 'left_to_right',
-    startPoint: { x: 529.3, y: -28.7 },
-    endPoint: { x: 44.3, y: -31.4 }
+    brushProfile: { continuousMask: 1, minorScale: 1.02 }
+  },
+  49: {
+    ...canonicalBaaStroke(CANONICAL_LETTER_PATHS.ع.initial, 'right_to_left'),
+    outlinePath: INITIAL_AIN_OUTLINE,
+    brushProfile: { continuousMask: 1, minorScale: 1.02 }
   },
   51: {
-    ...FINAL_LAM_STROKE,
+    ...canonicalBaaStroke(CANONICAL_LETTER_PATHS.ف.final),
     brushProfile: { continuousMask: 1, minorScale: 1.02 },
-    medianPath:
-      'M 1098 -36 C 1000 -36, 915 -42, 850 -65 C 785 -88, 725 -150, 725 -230 C 725 -305, 785 -372, 858 -372 C 930 -372, 975 -305, 975 -230 C 975 -155, 920 -95, 850 -65 C 770 -35, 640 -22, 500 -22 L 360 -22 C 240 -22, 130 -40, 95 -90 C 65 -135, 65 -210, 88 -280',
-    outlinePath: FINAL_FAA_OUTLINE,
-    length: 2090,
-    startPoint: { x: 1098, y: -36 },
-    endPoint: { x: 88, y: -280 }
+    outlinePath: FINAL_FAA_OUTLINE
   },
   52: {
-    ...FINAL_LAM_STROKE,
-    brushProfile: { continuousMask: 1, minorScale: 1.05 },
-    medianPath:
-      'M 495 -36 L 380 -36 L 290 -36 L 210 -65 L 150 -135 L 122 -225 L 145 -315 L 195 -365 L 255 -378 L 315 -365 L 365 -310 L 379 -230 L 360 -145 L 305 -80 L 250 -40 L 150 -36 L 0 -36',
-    points: [
-      [495, -36],
-      [380, -36],
-      [290, -36],
-      [210, -65],
-      [150, -135],
-      [122, -225],
-      [145, -315],
-      [195, -365],
-      [255, -378],
-      [315, -365],
-      [365, -310],
-      [379, -230],
-      [360, -145],
-      [305, -80],
-      [250, -40],
-      [150, -36],
-      [0, -36]
-    ],
-    pointsWithWidth: [
-      { x: 495, y: -36, t: 0, width: 40 },
-      { x: 380, y: -36, t: 0.08, width: 105 },
-      { x: 290, y: -36, t: 0.15, width: 105 },
-      { x: 210, y: -65, t: 0.21, width: 105 },
-      { x: 150, y: -135, t: 0.27, width: 105 },
-      { x: 122, y: -225, t: 0.34, width: 105 },
-      { x: 145, y: -315, t: 0.4, width: 105 },
-      { x: 195, y: -365, t: 0.45, width: 105 },
-      { x: 255, y: -378, t: 0.5, width: 105 },
-      { x: 315, y: -365, t: 0.54, width: 105 },
-      { x: 365, y: -310, t: 0.59, width: 105 },
-      { x: 379, y: -230, t: 0.65, width: 105 },
-      { x: 360, y: -145, t: 0.71, width: 105 },
-      { x: 305, y: -80, t: 0.77, width: 105 },
-      { x: 250, y: -40, t: 0.82, width: 105 },
-      { x: 150, y: -36, t: 0.89, width: 105 },
-      { x: 0, y: -36, t: 1, width: 40 }
-    ],
-    outlinePath: MEDIAL_FAA_OUTLINE,
-    length: 1409,
-    startPoint: { x: 495, y: -36 },
-    endPoint: { x: 0, y: -36 }
+    ...canonicalBaaStroke(CANONICAL_LETTER_PATHS.ف.medial),
+    brushProfile: { continuousMask: 1, minorScale: 1.02 },
+    outlinePath: MEDIAL_FAA_OUTLINE
   },
   53: {
-    ...FINAL_LAM_STROKE,
+    ...canonicalBaaStroke(CANONICAL_LETTER_PATHS.ف.initial),
     brushProfile: { continuousMask: 1, minorScale: 1.02 },
-    medianPath:
-      'M 347.26 -202.08 L 344.47 -204.86 L 333.34 -204.86 L 240.11 -197.91 L 199.76 -200.69 L 166.36 -209.04 L 130.18 -236.87 L 121.83 -252.17 L 114.88 -281.4 L 116.27 -316.18 L 124.62 -362.1 L 137.14 -389.93 L 153.84 -414.98 L 184.45 -444.2 L 196.97 -449.77 L 237.33 -458.12 L 272.12 -453.94 L 287.42 -446.98 L 316.64 -420.55 L 336.12 -388.54 L 347.26 -357.93 L 357 -314.79 L 361.17 -260.52 L 358.39 -216 L 337.52 -192.34 L 309.69 -168.68 L 313.86 -167.29 L 348.65 -199.3 L 337.52 -135.29 L 318.03 -107.46 L 298.55 -87.98 L 251.24 -61.54 L 199.76 -49.02 L 158.01 -43.45 L 50.87 -37.88 L 0 -36',
-    outlinePath: INITIAL_FAA_OUTLINE,
-    length: 1381.74,
-    startPoint: { x: 347.26, y: -202.08 },
-    endPoint: { x: 0, y: -36 }
+    outlinePath: INITIAL_FAA_OUTLINE
   },
   55: {
     ...FINAL_LAM_STROKE,
@@ -739,24 +686,16 @@ const FONT_CONTEXTUAL_STROKES: Record<number, StrokeItem | StrokeItem[]> = {
     endPoint: { x: 85, y: -155 }
   },
   59: {
-    ...FINAL_LAM_STROKE,
+    ...canonicalBaaStroke(CANONICAL_KAF_PATHS.finalBody),
     brushProfile: { continuousMask: 1, minorScale: 1.02 },
     medianPath:
-      'M 965.1 -32.9 L 862.6 -39.8 C 820.8 -115.1, 791.3 -126.7, 783.6 -157.6 L 760 -680 L 784.8 -156.3 C 740 -50, 650 -36, 494.2 -21.2 L 248.6 -22.5 C 165 -48.2, 112 -50, 71.1 -129.3 L 88 -321.2',
+      CANONICAL_KAF_PATHS.finalBody,
     outlinePath: FINAL_KAF_OUTLINE,
-    length: 2050,
-    startPoint: { x: 965.1, y: -32.9 },
-    endPoint: { x: 88, y: -321.2 }
   },
   60: {
-    ...FINAL_LAM_STROKE,
+    ...canonicalBaaStroke(CANONICAL_KAF_PATHS.medial),
     brushProfile: { continuousMask: 1, minorScale: 1.02 },
-    medianPath:
-      'M 551.1 -34.2 L 413.2 -59.9 C 333.5 -117.8, 323.2 -139.6, 321.9 -192.4 L 55.7 -463.7 L 400 -670 C 331.2 -640.8, 219.2 -608, 54.4 -465 C 89.4 -415.4, 298.4 -241.9, 318 -193.6 C 310.3 -29, 180 -36, 176.6 -35.5 L 11.5 -35.6',
-    outlinePath: MEDIAL_KAF_OUTLINE,
-    length: 1700,
-    startPoint: { x: 551.1, y: -34.2 },
-    endPoint: { x: 11.5, y: -35.6 }
+    outlinePath: MEDIAL_KAF_OUTLINE
   },
   84: {
     ...FINAL_LAM_STROKE,
@@ -777,15 +716,7 @@ const FONT_CONTEXTUAL_STROKES: Record<number, StrokeItem | StrokeItem[]> = {
     startPoint: { x: 60, y: -10 },
     endPoint: { x: 90, y: 10 }
   },
-  357: {
-    ...FINAL_LAM_STROKE,
-    medianPath:
-      'M 519.7 -511.2 C 343.7 -418.5, 442.8 -407, 496.8 -319.5 C 509.6 -323.4, 477.5 -250.1, 361.3 -233.8',
-    outlinePath: MINI_KEHEHAR_OUTLINE,
-    length: 520,
-    startPoint: { x: 519.7, y: -511.2 },
-    endPoint: { x: 361.3, y: -233.8 }
-  }
+  357: canonicalKafFinalStrokes()
 }
 
 const FONT_CONTEXTUAL_DEFINITIONS: Record<
@@ -929,6 +860,12 @@ const FONT_CONTEXTUAL_DEFINITIONS: Record<
     advanceWidth: 521,
     outlinePath: MEDIAL_AIN_OUTLINE
   },
+  49: {
+    glyphName: 'uni0639.init',
+    char: 'ع',
+    advanceWidth: 503,
+    outlinePath: INITIAL_AIN_OUTLINE
+  },
   51: {
     glyphName: 'uni06A1.fina',
     char: 'ف',
@@ -981,7 +918,7 @@ const FONT_CONTEXTUAL_DEFINITIONS: Record<
     glyphName: 'miniKehehar',
     char: 'ك',
     advanceWidth: 0,
-    outlinePath: MINI_KEHEHAR_OUTLINE
+    outlinePath: `${FINAL_KAF_OUTLINE} ${MINI_KEHEHAR_OUTLINE}`
   }
 }
 
@@ -1019,6 +956,7 @@ interface CandidateDataset {
 export class StrokeRegistry {
   private static instance: StrokeRegistry
   private wordGlyphMap: Map<number, TrustedStrokeDefinition> = new Map()
+  private contextualLetterMap: Map<string, TrustedStrokeDefinition> = new Map()
   private letterMap: Map<string, TrustedStrokeDefinition> = new Map()
   private letterMapByUnicode: Map<number, TrustedStrokeDefinition> = new Map()
   private initialized: boolean = false
@@ -1045,10 +983,125 @@ export class StrokeRegistry {
         char: letter.char,
         id: letter.id
       })
+      const canonicalPath = letter.char
+        ? CANONICAL_LETTER_PATHS[letter.char] || CANONICAL_RIGHT_JOINING_PATHS[letter.char]
+        : undefined
+      const canonicalDotPaths =
+        canonicalPath && 'dotPaths' in canonicalPath ? canonicalPath.dotPaths : undefined
+      const canonicalDotDirections =
+        canonicalPath && 'dotDirections' in canonicalPath ? canonicalPath.dotDirections : undefined
+      const canonicalAdditionalPaths =
+        canonicalPath && 'additionalStrokePaths' in canonicalPath
+          ? canonicalPath.additionalStrokePaths
+          : undefined
+      const canonicalAdditionalDirections =
+        canonicalPath && 'additionalStrokeDirections' in canonicalPath
+          ? canonicalPath.additionalStrokeDirections
+          : undefined
+      const canonicalStaticPaths = letter.char
+        ? CANONICAL_STATIC_LETTER_PATHS[letter.char]
+        : undefined
+      const canonicalStaticDirections = letter.char
+        ? CANONICAL_STATIC_LETTER_DIRECTIONS[letter.char]
+        : undefined
+      const canonicalBodyStroke = normalizedStrokes.find(
+        (stroke) => !(stroke.isCandidateDot || stroke.type === 'dot')
+      )
+      const preserveAdditionalStrokes = Boolean(
+        canonicalPath &&
+          'preserveAdditionalStrokes' in canonicalPath &&
+          canonicalPath.preserveAdditionalStrokes
+      )
+      const additionalTemplates = normalizedStrokes.filter((stroke) => stroke !== canonicalBodyStroke)
+      const additionalOutlinePaths = additionalTemplates.flatMap((stroke) =>
+        stroke.outlinePaths?.length
+          ? stroke.outlinePaths
+          : stroke.outlinePath
+            ? [stroke.outlinePath]
+            : []
+      )
+      const hamzaOutlinePaths =
+        additionalOutlinePaths.length > 0
+          ? additionalOutlinePaths
+          : splitOutlineContours(letter.outlinePath).slice(1)
+      const canonicalAdditionalStrokes = canonicalAdditionalPaths?.map((path, index) => {
+        const template = additionalTemplates[index] || additionalTemplates[0] || canonicalBodyStroke!
+        const normalizedPath = path === CANONICAL_HAMZA_PATH
+          ? fitHamzaPathToOutline(path, hamzaOutlinePaths)
+          : path
+        return canonicalStrokeFromPath(
+          normalizedPath,
+          canonicalAdditionalDirections?.[index] || 'right_to_left',
+          {
+            ...template,
+            outlinePath: hamzaOutlinePaths.join(' ') || template.outlinePath,
+            outlinePaths: hamzaOutlinePaths.length ? hamzaOutlinePaths : template.outlinePaths
+          },
+          'stroke'
+        )
+      })
+      const canonicalStrokes =
+        canonicalStaticPaths
+          ? canonicalStaticPaths.map((path, index) =>
+              canonicalStrokeFromPath(
+                path,
+                canonicalStaticDirections?.[index] || 'right_to_left',
+                normalizedStrokes[index] || canonicalBodyStroke || normalizedStrokes[0],
+                'stroke'
+              )
+            )
+          : canonicalPath && canonicalBodyStroke
+          ? [
+              {
+                ...canonicalBodyStroke,
+                ...canonicalBaaStroke(
+                  canonicalPath.isolated,
+                  canonicalPath.isolatedDirection || 'right_to_left'
+                ),
+                order: 0,
+                originalOrder: 0,
+                outlinePath: canonicalBodyStroke.outlinePath,
+                outlinePaths: canonicalBodyStroke.outlinePaths
+              },
+              ...(canonicalAdditionalStrokes ||
+                normalizedStrokes.filter((stroke) =>
+                  preserveAdditionalStrokes
+                    ? stroke !== canonicalBodyStroke
+                    : stroke.isCandidateDot || stroke.type === 'dot'
+                ))
+                .map((stroke, index) => {
+                  const dotPath = canonicalDotPaths?.[index]
+                  const dotStroke = dotPath
+                    ? canonicalStrokeFromPath(
+                        dotPath,
+                        canonicalDotDirections?.[index] || 'bottom_to_top',
+                        stroke,
+                        'stroke'
+                      )
+                    : stroke
+                  return {
+                    ...dotStroke,
+                    order: index + 1,
+                    originalOrder: index + 1
+                  }
+                })
+            ]
+          : normalizedStrokes
+      const isolatedOutlinePath =
+        letter.char === 'ش'
+          ? [
+              splitOutlineContours(letter.outlinePath)[0],
+              ...canonicalStrokes
+                .filter((stroke) => stroke.isCandidateDot || stroke.type === 'dot')
+                .map((stroke) => stroke.outlinePath)
+            ]
+              .filter((path): path is string => Boolean(path))
+              .join(' ') || letter.outlinePath
+          : letter.outlinePath
       const isolatedContours = splitOutlineContours(letter.outlinePath)
       const strokes =
         letter.char === 'غ' && isolatedContours.length >= 3
-          ? normalizedStrokes.map((stroke) =>
+          ? canonicalStrokes.map((stroke) =>
               stroke.isCandidateDot
                 ? {
                     ...stroke,
@@ -1057,7 +1110,7 @@ export class StrokeRegistry {
                   }
                 : stroke
             )
-          : normalizedStrokes
+          : canonicalStrokes
       const def: TrustedStrokeDefinition = {
         id: letter.id,
         char: letter.char,
@@ -1067,7 +1120,7 @@ export class StrokeRegistry {
         isDotOrMark: false,
         advanceWidth: letter.advanceWidth,
         boundingBox: letter.boundingBox,
-        outlinePath: letter.outlinePath,
+        outlinePath: isolatedOutlinePath,
         strokes,
         sourceCategory: 'letters',
         provenance: 'verified_fixture'
@@ -1076,6 +1129,78 @@ export class StrokeRegistry {
       if (typeof letter.unicode === 'number') {
         this.letterMapByUnicode.set(letter.unicode, def)
       }
+    }
+
+    // Composite letters with a Hamza keep the protected body and outline,
+    // but use one canonical Hamza movement instead of the old two-step mark.
+    for (const char of ['ؤ', 'ئ']) {
+      const definition = this.letterMap.get(char)
+      if (!definition) continue
+      const body = definition.strokes.find((stroke) => !(stroke.isCandidateDot || stroke.type === 'dot'))
+      const markStrokes = definition.strokes.filter((stroke) => stroke !== body)
+      if (!body || markStrokes.length === 0) continue
+      const markOutlinePaths = markStrokes.flatMap((stroke) =>
+        stroke.outlinePaths?.length
+          ? stroke.outlinePaths
+          : stroke.outlinePath
+            ? [stroke.outlinePath]
+            : []
+      )
+      const hamzaOutlinePaths =
+        markOutlinePaths.length > 0
+          ? markOutlinePaths
+          : splitOutlineContours(definition.outlinePath).slice(1)
+      const canonicalHamza = canonicalStrokeFromPath(
+        fitHamzaPathToOutline(CANONICAL_HAMZA_PATH, hamzaOutlinePaths),
+        'right_to_left',
+        {
+          ...markStrokes[0],
+          outlinePath: hamzaOutlinePaths.join(' ') || markStrokes[0].outlinePath,
+          outlinePaths: hamzaOutlinePaths.length ? hamzaOutlinePaths : markStrokes[0].outlinePaths
+        },
+        'stroke'
+      )
+      this.letterMap.set(char, {
+        ...definition,
+        strokes: [
+          { ...body, order: 0, originalOrder: 0 },
+          { ...canonicalHamza, order: 1, originalOrder: 1 }
+        ]
+      })
+    }
+
+    // HarfBuzz represents an isolated noon in Noto Sans Arabic as the
+    // dotless base glyph uni06BA (GID 80) plus a separate dot glyph. Reuse
+    // only the verified noon body here; GID 281 remains responsible for the
+    // dot so the composed result keeps the authentic font decomposition.
+    const isolatedNoon = this.letterMap.get('ن')
+    const noonBody = isolatedNoon?.strokes.find(
+      (stroke) => !(stroke.isCandidateDot || stroke.type === 'dot')
+    )
+    const noonBodyOutline = splitOutlineContours(isolatedNoon?.outlinePath)[0]
+    if (isolatedNoon && noonBody && noonBodyOutline) {
+      const canonicalNoonBody: StrokeItem = {
+        ...noonBody,
+        order: 0,
+        originalOrder: 0,
+        isCandidateDot: false,
+        outlinePath: noonBodyOutline,
+        outlinePaths: [noonBodyOutline]
+      }
+      this.wordGlyphMap.set(80, {
+        id: 'canonical_contextual_uni06BA',
+        glyphId: 80,
+        char: 'ن',
+        glyphName: 'uni06BA',
+        isIsolatedLetter: false,
+        isDotOrMark: false,
+        advanceWidth: isolatedNoon.advanceWidth,
+        outlinePath: noonBodyOutline,
+        outlinePaths: [noonBodyOutline],
+        strokes: [canonicalNoonBody],
+        sourceCategory: 'contextual',
+        provenance: 'canonical_runtime'
+      })
     }
 
     // 2. Index contextual, diacritic, special, and extended word glyphs (Authoritative GID fixtures)
@@ -1102,6 +1227,18 @@ export class StrokeRegistry {
             if (shouldOverride) {
               const canonicalBaaStroke =
                 g.glyphId === 15 ? (FONT_CONTEXTUAL_STROKES[15] as StrokeItem) : null
+              const normalizedGlyphStrokes = normalizeGlyphStrokes(g.strokes || [], {
+                char: g.char,
+                id: w.id,
+                outlinePath: g.outlinePath || undefined
+              })
+              const glyphOutlinePath =
+                g.glyphId === 291
+                  ? normalizedGlyphStrokes
+                      .map((stroke) => stroke.outlinePath)
+                      .filter((path): path is string => Boolean(path))
+                      .join(' ') || g.outlinePath
+                  : g.outlinePath
               const def: TrustedStrokeDefinition = {
                 id: `${cat}_${w.id}_g${g.glyphId}`,
                 glyphId: g.glyphId,
@@ -1110,13 +1247,10 @@ export class StrokeRegistry {
                 isIsolatedLetter: false,
                 isDotOrMark: isDot,
                 advanceWidth: g.xAdvance,
-                outlinePath: g.outlinePath || undefined,
+                outlinePath: glyphOutlinePath || undefined,
                 strokes: canonicalBaaStroke
-                  ? [{ ...canonicalBaaStroke, outlinePath: g.outlinePath || undefined }]
-                  : assignOutlineComponents(
-                      normalizeGlyphStrokes(g.strokes || [], { char: g.char, id: w.id }),
-                      g.outlinePath || undefined
-                    ),
+                  ? [{ ...canonicalBaaStroke, outlinePath: glyphOutlinePath || undefined }]
+                  : assignOutlineComponents(normalizedGlyphStrokes, glyphOutlinePath || undefined),
                 sourceCategory: cat,
                 provenance: 'verified_fixture'
               }
@@ -1125,6 +1259,209 @@ export class StrokeRegistry {
           }
         }
       }
+    }
+
+    // HarfBuzz emits these Hamza components as independent glyphs in words.
+    // Canonicalize their movement while keeping every protected TrueType
+    // contour on the single replacement stroke.
+    for (const glyphId of [4, 296, 324]) {
+      const definition = this.wordGlyphMap.get(glyphId)
+      if (!definition || definition.strokes.length === 0) continue
+      const outlinePaths = splitOutlineContours(definition.outlinePath)
+      const template = {
+        ...definition.strokes[0],
+        outlinePath: outlinePaths.join(' ') || definition.strokes[0].outlinePath,
+        outlinePaths: outlinePaths.length ? outlinePaths : definition.strokes[0].outlinePaths
+      }
+      const canonicalHamza = canonicalStrokeFromPath(
+        fitHamzaPathToOutline(CANONICAL_HAMZA_PATH, outlinePaths),
+        'right_to_left',
+        template,
+        'stroke'
+      )
+      this.wordGlyphMap.set(glyphId, {
+        ...definition,
+        strokes: [{ ...canonicalHamza, order: 0, originalOrder: 0 }]
+      })
+    }
+
+    // Short alif variants are shaped as the same base GID with a separate
+    // Hamza component. Keep their two verified movements together so the
+    // isolated editor and contextual rendering share one definition.
+    const shortAlifBody = this.wordGlyphMap.get(12)
+    const shortAlifBodyTemplate = shortAlifBody?.strokes.find(
+      (stroke) => !(stroke.isCandidateDot || stroke.type === 'dot')
+    )
+    const shortAlifBodyOutline =
+      splitOutlineContours(shortAlifBody?.outlinePath)[0] || SHORT_ALIF_OUTLINE
+    const finalAlifDefinition = this.wordGlyphMap.get(9)
+    const finalAlifTemplate = finalAlifDefinition?.strokes.find(
+      (stroke) => !(stroke.isCandidateDot || stroke.type === 'dot')
+    )
+    const finalAlifOutline = finalAlifDefinition?.outlinePath
+
+    for (const [char, hamzaGlyphId] of [
+      ['أ', 296],
+      ['إ', 324]
+    ] as const) {
+      const canonicalPath = CANONICAL_LETTER_PATHS[char]
+      const hamzaDefinition = this.wordGlyphMap.get(hamzaGlyphId)
+      const hamzaTemplate = hamzaDefinition?.strokes[0]
+      // The standalone combining-mark outline is in its own glyph space. The
+      // verified letter fixture already contains the mark translated into the
+      // base-alif coordinate space, so prefer that contour for the composite
+      // shadow and avoid a displaced or corrupted hamza.
+      const letterContours = splitOutlineContours(this.letterMap.get(char)?.outlinePath)
+      const hamzaOutline =
+        letterContours[1] || splitOutlineContours(hamzaDefinition?.outlinePath)[0]
+      const additionalPath = canonicalPath.additionalStrokePaths?.[0]
+      if (!shortAlifBodyTemplate || !hamzaTemplate || !additionalPath) continue
+
+      const bodyStroke = canonicalStrokeFromPath(
+        canonicalPath.isolated,
+        canonicalPath.isolatedDirection || 'left_to_right',
+        {
+          ...shortAlifBodyTemplate,
+          outlinePath: shortAlifBodyOutline,
+          outlinePaths: [shortAlifBodyOutline]
+        },
+        'main_body'
+      )
+      const hamzaStroke = canonicalStrokeFromPath(
+        additionalPath,
+        canonicalPath.additionalStrokeDirections?.[0] || 'right_to_left',
+        {
+          ...hamzaTemplate,
+          outlinePath: hamzaOutline || hamzaTemplate.outlinePath,
+          outlinePaths: hamzaOutline ? [hamzaOutline] : hamzaTemplate.outlinePaths
+        },
+        'stroke'
+      )
+      const connectedBodyStroke = canonicalStrokeFromPath(
+        CANONICAL_LETTER_PATHS.ا.final,
+        'right_to_left',
+        {
+          ...(finalAlifTemplate || shortAlifBodyTemplate),
+          outlinePath: finalAlifOutline || shortAlifBodyOutline,
+          outlinePaths: finalAlifOutline ? [finalAlifOutline] : [shortAlifBodyOutline]
+        },
+        'main_body'
+      )
+      const outlinePaths = [shortAlifBodyOutline, hamzaOutline].filter(
+        (path): path is string => Boolean(path)
+      )
+      const connectedOutlinePaths = [finalAlifOutline || shortAlifBodyOutline, hamzaOutline].filter(
+        (path): path is string => Boolean(path)
+      )
+      const compositeDefinition: TrustedStrokeDefinition = {
+        ...(shortAlifBody || {
+          id: `special_short_alif_${char}`,
+          sourceCategory: 'special' as const,
+          provenance: 'canonical_runtime' as const
+        }),
+        id: `canonical_short_alif_${char}`,
+        glyphId: 12,
+        char,
+        glyphName: 'uni0627.short',
+        isIsolatedLetter: true,
+        isDotOrMark: false,
+        outlinePath: outlinePaths.join(' '),
+        outlinePaths,
+        strokes: [
+          { ...bodyStroke, order: 0, originalOrder: 0 },
+          { ...hamzaStroke, order: 1, originalOrder: 1 }
+        ],
+        sourceCategory: 'special',
+        provenance: 'canonical_runtime'
+      }
+      this.letterMap.set(char, compositeDefinition)
+      this.contextualLetterMap.set(`${char}:${CANONICAL_CONTEXTUAL_GLYPHS.shortAlif}`, {
+        ...compositeDefinition,
+        id: `canonical_contextual_short_alif_${char}`,
+        glyphId: CANONICAL_CONTEXTUAL_GLYPHS.shortAlif,
+        isIsolatedLetter: false,
+        outlinePath: connectedOutlinePaths.join(' '),
+        outlinePaths: connectedOutlinePaths,
+        strokes: [
+          { ...connectedBodyStroke, order: 0, originalOrder: 0 },
+          { ...hamzaStroke, order: 1, originalOrder: 1 }
+        ],
+        sourceCategory: 'contextual'
+      })
+
+      // In a word, HarfBuzz emits the short-alif body as GID 12 and keeps
+      // the hamza/maddah as a separate mark glyph. Use the canonical body
+      // movement here as well, without importing the composite mark twice.
+      this.contextualLetterMap.set(`${char}:12`, {
+        ...compositeDefinition,
+        id: `canonical_contextual_short_alif_body_${char}`,
+        glyphId: 12,
+        isIsolatedLetter: false,
+        outlinePath: shortAlifBodyOutline,
+        outlinePaths: [shortAlifBodyOutline],
+        strokes: [{ ...bodyStroke, order: 0, originalOrder: 0 }],
+        sourceCategory: 'contextual',
+        provenance: 'canonical_runtime'
+      })
+    }
+
+    // In a shaped word, alif hamza marks live in their own glyph space.
+    // Translate the canonical composite path between the matching TrueType
+    // contours instead of scaling it to the mark bounds, which would shorten
+    // the upper sweep and leave the shadow partially unrevealed.
+    for (const [char, hamzaGlyphId] of [
+      ['أ', 296],
+      ['إ', 324]
+    ] as const) {
+      const compositeDefinition = this.letterMap.get(char)
+      const markDefinition = this.wordGlyphMap.get(hamzaGlyphId)
+      const canonicalPath = CANONICAL_LETTER_PATHS[char]?.additionalStrokePaths?.[0]
+      const sourceContour = splitOutlineContours(compositeDefinition?.outlinePath)[1]
+      const targetContour = splitOutlineContours(markDefinition?.outlinePath)[0]
+      const sourceBounds = pathCoordinateBounds(sourceContour)
+      const targetBounds = pathCoordinateBounds(targetContour)
+      const template = markDefinition?.strokes[0]
+
+      if (!canonicalPath || !sourceBounds || !targetBounds || !template) continue
+
+      const translatedPath = translateMedianPath(
+        canonicalPath,
+        targetBounds.minX - sourceBounds.minX,
+        targetBounds.minY - sourceBounds.minY
+      )
+      const translatedStroke = canonicalStrokeFromPath(
+        translatedPath,
+        'right_to_left',
+        template,
+        'stroke'
+      )
+
+      this.contextualLetterMap.set(`${char}:${hamzaGlyphId}`, {
+        ...markDefinition,
+        id: `canonical_contextual_${char}_hamza`,
+        char,
+        glyphId: hamzaGlyphId,
+        glyphName: markDefinition.glyphName,
+        isIsolatedLetter: false,
+        strokes: [{ ...translatedStroke, order: 0, originalOrder: 0 }],
+        sourceCategory: 'contextual',
+        provenance: 'canonical_runtime'
+      })
+    }
+
+    // Long alif with maddah uses the same two-stroke composite in isolated
+    // and right-connected contexts. The contextual font glyph reuses the
+    // short-alif ID, so keep the canonical body and maddah movement together.
+    const maddahAlifDefinition = this.letterMap.get('آ')
+    if (maddahAlifDefinition) {
+      this.contextualLetterMap.set(`${'آ'}:${CANONICAL_CONTEXTUAL_GLYPHS.shortAlif}`, {
+        ...maddahAlifDefinition,
+        id: 'canonical_contextual_maddah_alif',
+        glyphId: CANONICAL_CONTEXTUAL_GLYPHS.shortAlif,
+        isIsolatedLetter: false,
+        sourceCategory: 'contextual',
+        provenance: 'canonical_runtime'
+      })
     }
 
     // Keep the protected TrueType outline for final ب while replacing only
@@ -1136,6 +1473,150 @@ export class StrokeRegistry {
         ...finalBaaDefinition,
         strokes: [{ ...finalBaaStroke, outlinePath: finalBaaDefinition.outlinePath }]
       })
+    }
+
+    // The editor-verified initial and medial forms keep their existing
+    // TrueType outlines while using the reduced canonical median paths.
+    const contextualStates = [
+      ['ي', CANONICAL_CONTEXTUAL_GLYPHS.wideInitial, CANONICAL_LETTER_PATHS.ي.initial, CANONICAL_LETTER_PATHS.ي.initialDirection],
+      ['ي', CANONICAL_CONTEXTUAL_GLYPHS.wideMedial, CANONICAL_LETTER_PATHS.ي.medial, 'right_to_left'],
+      ['ي', 102, CANONICAL_LETTER_PATHS.ي.final, 'right_to_left'],
+      ['ئ', CANONICAL_CONTEXTUAL_GLYPHS.initial, CANONICAL_LETTER_PATHS.ي.initial, CANONICAL_LETTER_PATHS.ي.initialDirection],
+      ['ئ', CANONICAL_CONTEXTUAL_GLYPHS.medial, CANONICAL_LETTER_PATHS.ي.medial, 'right_to_left'],
+      ['ئ', 102, CANONICAL_LETTER_PATHS.ي.final, 'right_to_left'],
+      ['ب', CANONICAL_CONTEXTUAL_GLYPHS.initial, CANONICAL_LETTER_PATHS.ب.initial, CANONICAL_LETTER_PATHS.ب.initialDirection],
+      ['ب', CANONICAL_CONTEXTUAL_GLYPHS.medial, CANONICAL_LETTER_PATHS.ب.medial, 'right_to_left'],
+      ['ب', CANONICAL_CONTEXTUAL_GLYPHS.wideMedial, CANONICAL_LETTER_PATHS.ب.medial, 'right_to_left'],
+      ['ب', CANONICAL_CONTEXTUAL_GLYPHS.final, CANONICAL_LETTER_PATHS.ب.final, 'right_to_left'],
+      ['ت', CANONICAL_CONTEXTUAL_GLYPHS.wideInitial, CANONICAL_LETTER_PATHS.ت.initial, CANONICAL_LETTER_PATHS.ت.initialDirection],
+      ['ت', CANONICAL_CONTEXTUAL_GLYPHS.wideMedial, CANONICAL_LETTER_PATHS.ت.medial, 'right_to_left'],
+      ['ت', CANONICAL_CONTEXTUAL_GLYPHS.final, CANONICAL_LETTER_PATHS.ت.final, 'right_to_left'],
+      ['ث', CANONICAL_CONTEXTUAL_GLYPHS.wideInitial, CANONICAL_LETTER_PATHS.ث.initial, CANONICAL_LETTER_PATHS.ث.initialDirection],
+      ['ث', CANONICAL_CONTEXTUAL_GLYPHS.wideMedial, CANONICAL_LETTER_PATHS.ث.medial, 'right_to_left'],
+      ['ث', CANONICAL_CONTEXTUAL_GLYPHS.final, CANONICAL_LETTER_PATHS.ث.final, 'right_to_left'],
+      ['ن', CANONICAL_CONTEXTUAL_GLYPHS.initial, CANONICAL_LETTER_PATHS.ن.initial, CANONICAL_LETTER_PATHS.ن.initialDirection],
+      ['ن', CANONICAL_CONTEXTUAL_GLYPHS.medial, CANONICAL_LETTER_PATHS.ن.medial, 'right_to_left'],
+      ['ن', CANONICAL_CONTEXTUAL_GLYPHS.noonFinal, CANONICAL_LETTER_PATHS.ن.final, 'right_to_left'],
+      ['ج', CANONICAL_CONTEXTUAL_GLYPHS.jeemInitial, CANONICAL_LETTER_PATHS.ج.initial, 'right_to_left'],
+      ['ج', CANONICAL_CONTEXTUAL_GLYPHS.jeemMedial, CANONICAL_LETTER_PATHS.ج.medial.split('\n'), 'right_to_left'],
+      ['ج', CANONICAL_CONTEXTUAL_GLYPHS.jeemFinal, CANONICAL_LETTER_PATHS.ج.final.split('\n'), 'right_to_left'],
+      ['ح', CANONICAL_CONTEXTUAL_GLYPHS.jeemInitial, CANONICAL_LETTER_PATHS.ح.initial, 'right_to_left'],
+      ['ح', CANONICAL_CONTEXTUAL_GLYPHS.jeemMedial, CANONICAL_LETTER_PATHS.ح.medial.split('\n'), 'right_to_left'],
+      ['ح', CANONICAL_CONTEXTUAL_GLYPHS.jeemFinal, CANONICAL_LETTER_PATHS.ح.final.split('\n'), 'right_to_left'],
+      ['خ', CANONICAL_CONTEXTUAL_GLYPHS.jeemInitial, CANONICAL_LETTER_PATHS.خ.initial, 'right_to_left'],
+      ['خ', CANONICAL_CONTEXTUAL_GLYPHS.jeemMedial, CANONICAL_LETTER_PATHS.خ.medial.split('\n'), 'right_to_left'],
+      ['خ', CANONICAL_CONTEXTUAL_GLYPHS.jeemFinal, CANONICAL_LETTER_PATHS.خ.final.split('\n'), 'right_to_left'],
+      ['س', 37, CANONICAL_LETTER_PATHS.س.initial, CANONICAL_LETTER_PATHS.س.initialDirection],
+      ['س', 36, CANONICAL_LETTER_PATHS.س.medial, 'right_to_left'],
+      ['س', 35, CANONICAL_LETTER_PATHS.س.final, 'right_to_left'],
+      ['ش', 37, CANONICAL_LETTER_PATHS.ش.initial, CANONICAL_LETTER_PATHS.ش.initialDirection],
+      ['ش', 36, CANONICAL_LETTER_PATHS.ش.medial, 'right_to_left'],
+      ['ش', 35, CANONICAL_LETTER_PATHS.ش.final, 'right_to_left'],
+      ['ص', CANONICAL_CONTEXTUAL_GLYPHS.sadInitial, CANONICAL_LETTER_PATHS.ص.initial, CANONICAL_LETTER_PATHS.ص.initialDirection],
+      ['ص', CANONICAL_CONTEXTUAL_GLYPHS.sadMedial, CANONICAL_LETTER_PATHS.ص.medial, 'right_to_left'],
+      ['ص', CANONICAL_CONTEXTUAL_GLYPHS.sadFinal, CANONICAL_LETTER_PATHS.ص.final, 'right_to_left'],
+      ['ض', CANONICAL_CONTEXTUAL_GLYPHS.sadInitial, CANONICAL_LETTER_PATHS.ض.initial, CANONICAL_LETTER_PATHS.ض.initialDirection],
+      ['ض', CANONICAL_CONTEXTUAL_GLYPHS.sadMedial, CANONICAL_LETTER_PATHS.ض.medial, 'right_to_left'],
+      ['ض', CANONICAL_CONTEXTUAL_GLYPHS.sadFinal, CANONICAL_LETTER_PATHS.ض.final, 'right_to_left'],
+      [
+        'ط',
+        CANONICAL_CONTEXTUAL_GLYPHS.tahInitial,
+        CANONICAL_MULTI_STROKE_LETTER_PATHS.ط.initial.map((stroke) => stroke.medianPath),
+        CANONICAL_MULTI_STROKE_LETTER_PATHS.ط.initial.map((stroke) => stroke.direction)
+      ],
+      [
+        'ط',
+        CANONICAL_CONTEXTUAL_GLYPHS.tahMedial,
+        CANONICAL_MULTI_STROKE_LETTER_PATHS.ط.medial.map((stroke) => stroke.medianPath),
+        CANONICAL_MULTI_STROKE_LETTER_PATHS.ط.medial.map((stroke) => stroke.direction)
+      ],
+      [
+        'ط',
+        CANONICAL_CONTEXTUAL_GLYPHS.tahFinal,
+        CANONICAL_MULTI_STROKE_LETTER_PATHS.ط.final.map((stroke) => stroke.medianPath),
+        CANONICAL_MULTI_STROKE_LETTER_PATHS.ط.final.map((stroke) => stroke.direction)
+      ],
+      [
+        'ظ',
+        CANONICAL_CONTEXTUAL_GLYPHS.tahInitial,
+        CANONICAL_MULTI_STROKE_LETTER_PATHS.ظ.initial.map((stroke) => stroke.medianPath),
+        CANONICAL_MULTI_STROKE_LETTER_PATHS.ظ.initial.map((stroke) => stroke.direction)
+      ],
+      [
+        'ظ',
+        CANONICAL_CONTEXTUAL_GLYPHS.tahMedial,
+        CANONICAL_MULTI_STROKE_LETTER_PATHS.ظ.medial.map((stroke) => stroke.medianPath),
+        CANONICAL_MULTI_STROKE_LETTER_PATHS.ظ.medial.map((stroke) => stroke.direction)
+      ],
+      [
+        'ظ',
+        CANONICAL_CONTEXTUAL_GLYPHS.tahFinal,
+        CANONICAL_MULTI_STROKE_LETTER_PATHS.ظ.final.map((stroke) => stroke.medianPath),
+        CANONICAL_MULTI_STROKE_LETTER_PATHS.ظ.final.map((stroke) => stroke.direction)
+      ],
+      ['ع', CANONICAL_CONTEXTUAL_GLYPHS.ainInitial, CANONICAL_LETTER_PATHS.ع.initial, CANONICAL_LETTER_PATHS.ع.initialDirection],
+      ['ع', CANONICAL_CONTEXTUAL_GLYPHS.ainMedial, CANONICAL_LETTER_PATHS.ع.medial, CANONICAL_LETTER_PATHS.ع.isolatedDirection],
+      ['ع', CANONICAL_CONTEXTUAL_GLYPHS.ainFinal, CANONICAL_LETTER_PATHS.ع.final, CANONICAL_LETTER_PATHS.ع.isolatedDirection],
+      ['ل', CANONICAL_CONTEXTUAL_GLYPHS.lamInitial, CANONICAL_LETTER_PATHS.ل.initial, 'right_to_left'],
+      ['ل', CANONICAL_CONTEXTUAL_GLYPHS.lamMedial, CANONICAL_LETTER_PATHS.ل.medial, 'bottom_to_top'],
+      ['ل', CANONICAL_CONTEXTUAL_GLYPHS.lamFinal, CANONICAL_LETTER_PATHS.ل.final, 'right_to_left'],
+      ['م', CANONICAL_CONTEXTUAL_GLYPHS.meemInitial, CANONICAL_LETTER_PATHS.م.initial, 'right_to_left'],
+      ['م', CANONICAL_CONTEXTUAL_GLYPHS.meemMedial, CANONICAL_LETTER_PATHS.م.medial, 'right_to_left'],
+      ['م', CANONICAL_CONTEXTUAL_GLYPHS.meemFinal, CANONICAL_LETTER_PATHS.م.final, 'right_to_left'],
+      ['ه', CANONICAL_CONTEXTUAL_GLYPHS.haaInitial, CANONICAL_LETTER_PATHS.ه.initial, 'right_to_left'],
+      ['ه', CANONICAL_CONTEXTUAL_GLYPHS.haaMedial, CANONICAL_LETTER_PATHS.ه.medial, 'right_to_left'],
+      ['ه', CANONICAL_CONTEXTUAL_GLYPHS.haaFinal, CANONICAL_LETTER_PATHS.ه.final, 'right_to_left'],
+      ['ا', 8, CANONICAL_LETTER_PATHS.ا.initial, CANONICAL_LETTER_PATHS.ا.initialDirection],
+      ['ا', 9, CANONICAL_LETTER_PATHS.ا.final, 'right_to_left'],
+      ['د', 29, CANONICAL_RIGHT_JOINING_PATHS.د.final, 'right_to_left'],
+      ['ذ', 29, CANONICAL_RIGHT_JOINING_PATHS.ذ.final, 'right_to_left'],
+      ['ر', 31, CANONICAL_RIGHT_JOINING_PATHS.ر.final, 'right_to_left'],
+      ['ز', 31, CANONICAL_RIGHT_JOINING_PATHS.ز.final, 'right_to_left'],
+      ['و', 98, CANONICAL_RIGHT_JOINING_PATHS.و.final, 'right_to_left']
+    ] as const
+
+    for (const [char, glyphId, medianPath, direction] of contextualStates) {
+      const fontDefinition = FONT_CONTEXTUAL_DEFINITIONS[glyphId]
+      const definition =
+        this.wordGlyphMap.get(glyphId) ||
+        (fontDefinition
+          ? {
+              id: `canonical_contextual_${fontDefinition.glyphName}`,
+              glyphId,
+              char: fontDefinition.char,
+              glyphName: fontDefinition.glyphName,
+              isIsolatedLetter: false,
+              isDotOrMark: false,
+              advanceWidth: fontDefinition.advanceWidth,
+              outlinePath: fontDefinition.outlinePath,
+              strokes: [],
+              sourceCategory: 'contextual' as const,
+              provenance: 'canonical_runtime' as const
+            }
+          : null)
+      if (!definition) continue
+      const medianPaths: readonly string[] = typeof medianPath === 'string' ? [medianPath] : medianPath
+      const directions: readonly string[] = typeof direction === 'string' ? [] : direction || []
+      const contextualDefinition = {
+        ...definition,
+        id: `canonical_contextual_${char}_${glyphId}`,
+        char,
+        provenance: 'canonical_runtime' as const,
+        strokes: medianPaths.map(
+          (path, order) => ({
+            ...canonicalBaaStroke(
+              path,
+              directions[order] || (typeof direction === 'string' ? direction : 'right_to_left')
+            ),
+            order,
+            originalOrder: order,
+            outlinePath: definition.outlinePath,
+            outlinePaths: definition.outlinePaths
+          })
+        )
+      }
+      this.contextualLetterMap.set(`${char}:${glyphId}`, contextualDefinition)
+      if (char === 'ب') this.wordGlyphMap.set(glyphId, contextualDefinition)
     }
 
     // 3. Register canonical contextual definitions that were authored against
@@ -1161,6 +1642,44 @@ export class StrokeRegistry {
       }
     }
 
+    // Replace fixture median paths for standalone marks while preserving the
+    // verified TrueType outline owned by each existing glyph definition.
+    for (const mark of Object.values(CANONICAL_MARK_PATHS)) {
+      const definition = this.wordGlyphMap.get(mark.glyphId)
+      if (!definition || definition.strokes.length === 0) continue
+
+      const outlineContours = splitOutlineContours(definition.outlinePath)
+      const strokes = mark.strokes.map((canonicalStroke, order) => {
+        const template = definition.strokes[order] || definition.strokes[0]
+        const ownedOutlinePaths =
+          mark.strokes.length === 1
+            ? outlineContours
+            : outlineContours[order]
+              ? [outlineContours[order]]
+              : template.outlinePaths || (template.outlinePath ? [template.outlinePath] : [])
+        const stroke = canonicalStrokeFromPath(
+          canonicalStroke.medianPath,
+          canonicalStroke.direction,
+          {
+            ...template,
+            type: canonicalStroke.type,
+            isCandidateDot: canonicalStroke.isCandidateDot,
+            outlinePath: ownedOutlinePaths.join(' ') || template.outlinePath,
+            outlinePaths: ownedOutlinePaths.length ? ownedOutlinePaths : template.outlinePaths
+          },
+          canonicalStroke.type
+        )
+        return { ...stroke, order, originalOrder: order, priority: order }
+      })
+
+      this.wordGlyphMap.set(mark.glyphId, {
+        ...definition,
+        glyphName: mark.glyphName,
+        isDotOrMark: true,
+        strokes
+      })
+    }
+
     this.initialized = true
   }
 
@@ -1184,7 +1703,7 @@ export class StrokeRegistry {
     const fallbackGlyphId = glyphId
     const fontFallback =
       fallbackGlyphId === undefined ? undefined : FONT_CONTEXTUAL_DEFINITIONS[fallbackGlyphId]
-    if (fontFallback && fallbackGlyphId !== undefined) {
+    if (fontFallback && fallbackGlyphId !== undefined && !glyphName.startsWith('uni063A.')) {
       const strokeOrStrokes = FONT_CONTEXTUAL_STROKES[fallbackGlyphId]
       const strokes = Array.isArray(strokeOrStrokes)
         ? strokeOrStrokes
@@ -1289,6 +1808,11 @@ export class StrokeRegistry {
     }
 
     if (glyphId === 69 || glyphName === 'uni0644.fina') {
+      const canonicalLamFinalStroke = {
+        ...canonicalBaaStroke(CANONICAL_LETTER_PATHS.ل.final, 'right_to_left', 'main_body'),
+        outlinePath: FINAL_LAM_OUTLINE,
+        outlinePaths: [FINAL_LAM_OUTLINE]
+      }
       return {
         id: 'canonical_contextual_uni0644.fina',
         glyphId: 69,
@@ -1298,46 +1822,78 @@ export class StrokeRegistry {
         isDotOrMark: false,
         advanceWidth: 730,
         outlinePath: FINAL_LAM_OUTLINE,
-        strokes: [FINAL_LAM_STROKE],
+        strokes: [canonicalLamFinalStroke],
         sourceCategory: 'contextual',
         provenance: 'canonical_runtime'
       }
     }
 
     // Contextual aliases for shared Faa / Qaf bodies
-    if (glyphName === 'uni066F.init' || glyphName === 'uni06A1.init' || glyphId === 53) {
-      return this.wordGlyphMap.get(53) || null
+    if (
+      glyphName === 'uni066F.init' ||
+      glyphName === 'uni06A1.init' ||
+      glyphId === CANONICAL_CONTEXTUAL_GLYPHS.faaInitial
+    ) {
+      return this.wordGlyphMap.get(CANONICAL_CONTEXTUAL_GLYPHS.faaInitial) || null
     }
-    if (glyphName === 'uni066F.medi' || glyphName === 'uni06A1.medi' || glyphId === 52) {
-      return this.wordGlyphMap.get(52) || null
+    if (
+      glyphName === 'uni066F.medi' ||
+      glyphName === 'uni06A1.medi' ||
+      glyphId === CANONICAL_CONTEXTUAL_GLYPHS.faaMedial
+    ) {
+      return this.wordGlyphMap.get(CANONICAL_CONTEXTUAL_GLYPHS.faaMedial) || null
     }
     if (glyphName === 'uni066F.fina' || glyphId === 55) {
       return this.wordGlyphMap.get(55) || null
     }
-    if (glyphName === 'uni06A1.fina' || glyphId === 51) {
-      return this.wordGlyphMap.get(51) || null
+    if (glyphName === 'uni06A1.fina' || glyphId === CANONICAL_CONTEXTUAL_GLYPHS.faaFinal) {
+      return this.wordGlyphMap.get(CANONICAL_CONTEXTUAL_GLYPHS.faaFinal) || null
     }
 
     // Contextual aliases for Sad / Dad
-    if (glyphName === 'uni0635.init' || glyphName === 'uni0636.init' || glyphId === 41) {
-      return this.wordGlyphMap.get(41) || null
+    if (
+      glyphName === 'uni0635.init' ||
+      glyphName === 'uni0636.init' ||
+      glyphId === CANONICAL_CONTEXTUAL_GLYPHS.sadInitial
+    ) {
+      return this.wordGlyphMap.get(CANONICAL_CONTEXTUAL_GLYPHS.sadInitial) || null
     }
-    if (glyphName === 'uni0635.medi' || glyphName === 'uni0636.medi' || glyphId === 40) {
-      return this.wordGlyphMap.get(40) || null
+    if (
+      glyphName === 'uni0635.medi' ||
+      glyphName === 'uni0636.medi' ||
+      glyphId === CANONICAL_CONTEXTUAL_GLYPHS.sadMedial
+    ) {
+      return this.wordGlyphMap.get(CANONICAL_CONTEXTUAL_GLYPHS.sadMedial) || null
     }
-    if (glyphName === 'uni0635.fina' || glyphName === 'uni0636.fina' || glyphId === 39) {
-      return this.wordGlyphMap.get(39) || null
+    if (
+      glyphName === 'uni0635.fina' ||
+      glyphName === 'uni0636.fina' ||
+      glyphId === CANONICAL_CONTEXTUAL_GLYPHS.sadFinal
+    ) {
+      return this.wordGlyphMap.get(CANONICAL_CONTEXTUAL_GLYPHS.sadFinal) || null
     }
 
     // Contextual aliases for Tah / Zah
-    if (glyphName === 'uni0637.init' || glyphName === 'uni0638.init' || glyphId === 45) {
-      return this.wordGlyphMap.get(45) || null
+    if (
+      glyphName === 'uni0637.init' ||
+      glyphName === 'uni0638.init' ||
+      glyphId === CANONICAL_CONTEXTUAL_GLYPHS.tahInitial
+    ) {
+      return this.wordGlyphMap.get(CANONICAL_CONTEXTUAL_GLYPHS.tahInitial) || null
     }
-    if (glyphName === 'uni0637.medi' || glyphName === 'uni0638.medi' || glyphId === 44) {
-      return this.wordGlyphMap.get(44) || null
+    if (
+      glyphName === 'uni0637.medi' ||
+      glyphName === 'uni0638.medi' ||
+      glyphId === CANONICAL_CONTEXTUAL_GLYPHS.tahMedial
+    ) {
+      return this.wordGlyphMap.get(CANONICAL_CONTEXTUAL_GLYPHS.tahMedial) || null
     }
-    if (glyphName === 'uni0637.fina' || glyphName === 'uni0638.fina' || glyphId === 43) {
-      return this.wordGlyphMap.get(43) || null
+    if (
+      glyphName === 'uni0637.fina' ||
+      glyphName === 'uni0638.fina' ||
+      glyphId === CANONICAL_CONTEXTUAL_GLYPHS.tahFinal
+    ) {
+      return this.wordGlyphMap.get(CANONICAL_CONTEXTUAL_GLYPHS.tahFinal) || null
     }
 
     // Contextual aliases for Seen / Sheen
@@ -1440,6 +1996,30 @@ export class StrokeRegistry {
 
     // 1. Explicit isolated letter resolution by character
     if (isIsolated === true) {
+      // The font reuses GID 357 for both isolated K and right-connected K.
+      // The isolated form has a different verified outline: it contains the
+      // complete K body plus the upper component, while the contextual form
+      // intentionally keeps only the mini-kehehar outline. Resolve the
+      // isolated definition by character so its shadow remains complete.
+      if (sourceChar === 'ك' && glyphId === 357) {
+        const isolatedDefinition = this.letterMap.get(sourceChar)
+        if (isolatedDefinition) {
+          return {
+            ...isolatedDefinition,
+            id: 'canonical_isolated_kaf',
+            glyphId: 357,
+            glyphName: 'miniKehehar',
+            isIsolatedLetter: true,
+            strokes: CANONICAL_KAF_PATHS.isolated.map((path, order) => ({
+              ...canonicalBaaStroke(path, 'right_to_left', 'stroke'),
+              order,
+              originalOrder: order,
+              outlinePath: isolatedDefinition.outlinePath,
+              outlinePaths: isolatedDefinition.outlinePaths
+            }))
+          }
+        }
+      }
       if (sourceChar && this.letterMap.has(sourceChar)) {
         return this.letterMap.get(sourceChar)!
       }
@@ -1447,14 +2027,54 @@ export class StrokeRegistry {
       return this.wordGlyphMap.get(glyphId) || null
     }
 
-    // 2. Contextual / word glyph lookup strictly by GID
+    // Ghain shares the Ain contextual glyph IDs, but must retain its
+    // independent upper dot instead of resolving to the plain Ain body.
+    if (sourceChar === 'غ' && [
+      CANONICAL_CONTEXTUAL_GLYPHS.ainInitial,
+      CANONICAL_CONTEXTUAL_GLYPHS.ainMedial,
+      CANONICAL_CONTEXTUAL_GLYPHS.ainFinal
+    ].some((id) => id === glyphId)) {
+      const suffix = glyphId === CANONICAL_CONTEXTUAL_GLYPHS.ainInitial
+        ? 'init'
+        : glyphId === CANONICAL_CONTEXTUAL_GLYPHS.ainMedial
+          ? 'medi'
+          : 'fina'
+      return this.getCompatibleContextualGlyph(`uni063A.${suffix}`, glyphId)
+    }
+
+    // 2. Contextual letter variants use source character plus GID. This is
+    // required for shared Noto glyph IDs whose verified educational paths
+    // differ by letter while their TrueType outlines remain compatible.
+    if (sourceChar) {
+      const contextualLetter = this.contextualLetterMap.get(`${sourceChar}:${glyphId}`)
+      if (contextualLetter) return contextualLetter
+    }
+
+    // 3. Contextual / word glyph lookup by GID
     // When isIsolated is false or omitted for word glyphs, NEVER substitute isolated geometry
     const wordDef = this.wordGlyphMap.get(glyphId)
     if (wordDef) {
       return wordDef
     }
 
-    // 3. If isIsolated is unspecified but sourceChar is provided, only return letterMap if glyph is genuinely isolated
+    // A right-joining letter at the end of a word can keep its isolated
+    // OpenType glyph ID when the preceding letter does not connect to it.
+    // Reuse the verified isolated definition as a contextual definition
+    // instead of treating that valid form as an unsupported glyph.
+    if (sourceChar && CANONICAL_RIGHT_JOINING_PATHS[sourceChar]) {
+      const isolatedDefinition = this.letterMap.get(sourceChar)
+      if (isolatedDefinition) {
+        return {
+          ...isolatedDefinition,
+          id: `canonical_contextual_${sourceChar}_${glyphId}`,
+          glyphId,
+          isIsolatedLetter: false,
+          provenance: 'canonical_runtime'
+        }
+      }
+    }
+
+    // 4. If isIsolated is unspecified but sourceChar is provided, only return letterMap if glyph is genuinely isolated
     // To prevent false fabrication for connected glyphs, we return null if wordDef was not found.
     return null
   }

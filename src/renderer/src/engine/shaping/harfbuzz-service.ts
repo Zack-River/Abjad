@@ -117,9 +117,7 @@ export class HarfBuzzService {
         const path = await import(/* @vite-ignore */ 'node:path')
         const candidatePaths = [
           path.resolve(process.cwd(), 'public/fonts/NotoSansArabic-Regular.ttf'),
-          path.resolve(process.cwd(), 'arabic-stroke/public/fonts/NotoSansArabic-Regular.ttf'),
-          path.resolve(__dirname, '../../../../public/fonts/NotoSansArabic-Regular.ttf'),
-          path.resolve(__dirname, '../../../../../public/fonts/NotoSansArabic-Regular.ttf')
+          path.resolve(process.cwd(), 'arabic-stroke/public/fonts/NotoSansArabic-Regular.ttf')
         ]
         const fontPath = candidatePaths.find((p) => fs.existsSync(p))
         if (!fontPath) {
@@ -157,32 +155,32 @@ export class HarfBuzzService {
     }
 
     const buffer = new this.hb.Buffer()
-    buffer.addText(text)
-    buffer.guessSegmentProperties()
-    this.hb.shape(this.font, buffer)
+    try {
+      buffer.addText(text)
+      buffer.guessSegmentProperties()
+      this.hb.shape(this.font, buffer)
 
-    const infos = buffer.getGlyphInfos()
-    const positions = buffer.getGlyphPositions()
+      const infos = buffer.getGlyphInfos()
+      const positions = buffer.getGlyphPositions()
 
-    const records: ShapedGlyphRecord[] = []
-    for (let i = 0; i < infos.length; i++) {
-      const glyphId = infos[i].codepoint
-      records.push({
-        glyphId,
-        glyphName: this.font.glyphName(glyphId) || `gid_${glyphId}`,
-        cluster: infos[i].cluster,
-        xAdvance: positions[i].xAdvance,
-        yAdvance: positions[i].yAdvance,
-        xOffset: positions[i].xOffset,
-        yOffset: positions[i].yOffset
-      })
+      const records: ShapedGlyphRecord[] = []
+      for (let i = 0; i < infos.length; i++) {
+        const glyphId = infos[i].codepoint
+        records.push({
+          glyphId,
+          glyphName: this.font.glyphName(glyphId) || `gid_${glyphId}`,
+          cluster: infos[i].cluster,
+          xAdvance: positions[i].xAdvance,
+          yAdvance: positions[i].yAdvance,
+          xOffset: positions[i].xOffset,
+          yOffset: positions[i].yOffset
+        })
+      }
+
+      return records
+    } finally {
+      buffer.destroy?.()
     }
-
-    if (typeof buffer.destroy === 'function') {
-      buffer.destroy()
-    }
-
-    return records
   }
 }
 

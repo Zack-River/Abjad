@@ -22,6 +22,16 @@ export interface AnimationState {
   isComplete: boolean
 }
 
+export interface CursorTransition {
+  id: string
+  kind: 'bridge' | 'lift'
+  startMs: number
+  endMs: number
+  path: string
+  startPoint: { x: number; y: number }
+  endPoint: { x: number; y: number }
+}
+
 export interface AnimationStep {
   id: string
   startMs: number
@@ -29,6 +39,8 @@ export interface AnimationStep {
   glyphIndex: number
   stroke: Stroke
   isDot: boolean
+  /** Movement before this authored stroke. It is not an educational step. */
+  transition?: CursorTransition
 }
 
 export interface AnimationTimeline {
@@ -41,6 +53,133 @@ export const PEN_TRAVEL_SPEED = 0.9 // font-units per ms
 export const MIN_INTER_GLYPH_PAUSE_MS = 150
 export const MAX_INTER_GLYPH_PAUSE_MS = 800
 export const CONNECTION_THRESHOLD_UNITS = 120
+export const MIN_CONTINUITY_BRIDGE_MS = 24
+export const MAX_CONTINUITY_BRIDGE_MS = 96
+export const CONTINUITY_TRAVEL_SPEED = 1.6
+export const MIN_BRIDGE_TANGENT_ALIGNMENT = 0.25
+export const MIN_BRIDGE_FORWARD_PROJECTION = 0.15
+/** Small initial brush exposure used while the cursor crosses a bridge. */
+export const BRIDGE_HANDOFF_PROGRESS = 0.0001
+
+interface StrokePointData {
+  point: { x: number; y: number }
+  tangent: { x: number; y: number }
+}
+
+function getStrokePointData(stroke: Stroke, atEnd: boolean): StrokePointData | null {
+  if (!stroke?.medianPath) return null
+
+  try {
+    const props = new svgPathProperties(stroke.medianPath)
+    const length = props.getTotalLength()
+    if (!length) return null
+
+    const pointLength = atEnd ? length : 0
+    const tangentWindow = Math.min(12, Math.max(2, length * 0.02))
+    const beforeLength = Math.max(0, pointLength - tangentWindow)
+    const afterLength = Math.min(length, pointLength + tangentWindow)
+    const before = props.getPointAtLength(beforeLength)
+    const after = props.getPointAtLength(afterLength)
+    const dx = after.x - before.x
+    const dy = after.y - before.y
+    const magnitude = Math.hypot(dx, dy)
+
+    return {
+      point: props.getPointAtLength(pointLength),
+      tangent: magnitude > 0 ? { x: dx / magnitude, y: dy / magnitude } : { x: 1, y: 0 }
+    }
+  } catch {
+    return null
+  }
+}
+
+function getWorldStrokePoint(
+  glyph: ComposedGlyph,
+  stroke: Stroke,
+  atEnd: boolean
+): StrokePointData | null {
+  const local = getStrokePointData(stroke, atEnd)
+  if (!local) return null
+  return {
+    point: {
+      x: (glyph.glyphX || 0) + local.point.x,
+      y: (glyph.glyphY || 0) + local.point.y
+    },
+    tangent: local.tangent
+  }
+}
+
+function dot(a: { x: number; y: number }, b: { x: number; y: number }): number {
+  return a.x * b.x + a.y * b.y
+}
+
+function normalize(point: { x: number; y: number }): { x: number; y: number } {
+  const magnitude = Math.hypot(point.x, point.y)
+  return magnitude > 0 ? { x: point.x / magnitude, y: point.y / magnitude } : { x: 1, y: 0 }
+}
+
+function getBridgeDirections(
+  start: StrokePointData,
+  end: StrokePointData
+): {
+  chord: { x: number; y: number }
+  startTangent: { x: number; y: number }
+  endTangent: { x: number; y: number }
+  tangentAlignment: number
+} {
+  const chord = normalize({
+    x: end.point.x - start.point.x,
+    y: end.point.y - start.point.y
+  })
+
+  // A verified Arabic stroke can reverse direction at a connection. Blend
+  // those endpoint tangents toward the short handoff vector so the bridge
+  // never travels behind its destination or creates a loop.
+  const clampTangent = (tangent: { x: number; y: number }): { x: number; y: number } => {
+    const projection = dot(tangent, chord)
+    if (projection >= MIN_BRIDGE_FORWARD_PROJECTION) return tangent
+    const correction = MIN_BRIDGE_FORWARD_PROJECTION - projection
+    return normalize({
+      x: tangent.x + chord.x * correction,
+      y: tangent.y + chord.y * correction
+    })
+  }
+
+  return {
+    chord,
+    startTangent: clampTangent(start.tangent),
+    endTangent: clampTangent(end.tangent),
+    tangentAlignment: dot(start.tangent, end.tangent)
+  }
+}
+
+function createTransition(
+  id: string,
+  kind: CursorTransition['kind'],
+  startMs: number,
+  durationMs: number,
+  start: StrokePointData,
+  end: StrokePointData
+): CursorTransition {
+  const dx = end.point.x - start.point.x
+  const dy = end.point.y - start.point.y
+  const distance = Math.hypot(dx, dy)
+  const handle = Math.min(distance * 0.45, 72)
+  const bridgeDirections = kind === 'bridge' ? getBridgeDirections(start, end) : null
+  const startTangent = bridgeDirections?.startTangent || start.tangent
+  const endTangent = bridgeDirections?.endTangent || end.tangent
+  const path = `M ${start.point.x} ${start.point.y} C ${start.point.x + startTangent.x * handle} ${start.point.y + startTangent.y * handle}, ${end.point.x - endTangent.x * handle} ${end.point.y - endTangent.y * handle}, ${end.point.x} ${end.point.y}`
+
+  return {
+    id,
+    kind,
+    startMs,
+    endMs: startMs + durationMs,
+    path,
+    startPoint: start.point,
+    endPoint: end.point
+  }
+}
 
 export function getInterGlyphDistance(
   prevGlyph: ComposedGlyph,
@@ -48,34 +187,10 @@ export function getInterGlyphDistance(
   nextGlyph: ComposedGlyph,
   nextStroke: Stroke
 ): number | null {
-  let endPt = prevStroke?.endPoint
-  if (!endPt && prevStroke?.medianPath) {
-    try {
-      const p = new svgPathProperties(prevStroke.medianPath)
-      endPt = p.getPointAtLength(p.getTotalLength())
-    } catch {
-      // ignore
-    }
-  }
-
-  let startPt = nextStroke?.startPoint
-  if (!startPt && nextStroke?.medianPath) {
-    try {
-      const p = new svgPathProperties(nextStroke.medianPath)
-      startPt = p.getPointAtLength(0)
-    } catch {
-      // ignore
-    }
-  }
-
-  if (!endPt || !startPt) return null
-
-  const ex = (prevGlyph.glyphX || 0) + endPt.x
-  const ey = (prevGlyph.glyphY || 0) + endPt.y
-  const sx = (nextGlyph.glyphX || 0) + startPt.x
-  const sy = (nextGlyph.glyphY || 0) + startPt.y
-
-  return Math.hypot(ex - sx, ey - sy)
+  const end = getWorldStrokePoint(prevGlyph, prevStroke, true)
+  const start = getWorldStrokePoint(nextGlyph, nextStroke, false)
+  if (!end || !start) return null
+  return Math.hypot(end.point.x - start.point.x, end.point.y - start.point.y)
 }
 
 export function smoothProgress(t: number): number {
@@ -85,6 +200,21 @@ export function smoothProgress(t: number): number {
 
 export interface TimelineOptions {
   connectGlyphs?: boolean
+}
+
+export function getBridgeHandoffProgress(
+  step: AnimationStep | undefined,
+  progressMs: number
+): number {
+  const transition = step?.transition
+  if (
+    transition?.kind !== 'bridge' ||
+    progressMs < transition.startMs ||
+    progressMs > transition.endMs
+  ) {
+    return 0
+  }
+  return BRIDGE_HANDOFF_PROGRESS
 }
 
 export function buildTimeline(
@@ -101,37 +231,89 @@ export function buildTimeline(
       const isDot = stroke.isCandidateDot ?? (stroke.type === 'dot' || glyph.semanticRole === 'dot')
       const durationMs = inkDurationMs(stroke as unknown as Stroke)
 
-      // When crossing a glyph boundary, calculate physical distance to determine
-      // travel duration, or 0ms in connected mode if touching (< CONNECTION_THRESHOLD_UNITS).
+      // When crossing a glyph boundary, calculate physical distance and create
+      // either a short cursive bridge or a lifted travel transition.
       const previousStep = steps[steps.length - 1]
       const crossesGlyphBoundary = previousStep && previousStep.glyphIndex !== i
 
+      let transition: CursorTransition | undefined
+
       if (crossesGlyphBoundary) {
         const prevGlyph = composed[previousStep.glyphIndex]
-        const dist = getInterGlyphDistance(
-          prevGlyph,
-          previousStep.stroke,
-          glyph,
-          stroke as unknown as Stroke
-        )
+        const previousStroke = previousStep.stroke
+        const currentStroke = stroke as unknown as Stroke
+        const previousEnd = getWorldStrokePoint(prevGlyph, previousStroke, true)
+        const currentStart = getWorldStrokePoint(glyph, currentStroke, false)
+        const dist =
+          previousEnd && currentStart
+            ? Math.hypot(
+                previousEnd.point.x - currentStart.point.x,
+                previousEnd.point.y - currentStart.point.y
+              )
+            : null
 
-        if (dist !== null) {
-          if (options.connectGlyphs && dist < CONNECTION_THRESHOLD_UNITS) {
-            // Truly touching glyphs in connected mode: seamless transition (0ms pause)
+        if (dist !== null && previousEnd && currentStart) {
+          const isBodyBoundary =
+            !previousStep.isDot &&
+            !isDot &&
+            prevGlyph.semanticRole === 'base' &&
+            glyph.semanticRole === 'base'
+
+          const bridgeDirections = getBridgeDirections(previousEnd, currentStart)
+          const canUseDirectionalBridge =
+            bridgeDirections.tangentAlignment >= MIN_BRIDGE_TANGENT_ALIGNMENT
+
+          if (
+            options.connectGlyphs &&
+            isBodyBoundary &&
+            dist < CONNECTION_THRESHOLD_UNITS &&
+            canUseDirectionalBridge
+          ) {
+            const bridgeDuration = Math.min(
+              MAX_CONTINUITY_BRIDGE_MS,
+              Math.max(MIN_CONTINUITY_BRIDGE_MS, dist / CONTINUITY_TRAVEL_SPEED)
+            )
+            transition = createTransition(
+              `${glyph.hb.glyphId}-bridge-${stroke.order ?? steps.length}`,
+              'bridge',
+              currentTimeMs,
+              bridgeDuration,
+              previousEnd,
+              currentStart
+            )
+            currentTimeMs += bridgeDuration
           } else {
-            // Dynamic travel pause proportional to physical distance
             const travelDuration = Math.min(
               MAX_INTER_GLYPH_PAUSE_MS,
               Math.max(MIN_INTER_GLYPH_PAUSE_MS, dist / PEN_TRAVEL_SPEED)
             )
+            transition = createTransition(
+              `${glyph.hb.glyphId}-lift-${stroke.order ?? steps.length}`,
+              'lift',
+              currentTimeMs,
+              travelDuration,
+              previousEnd,
+              currentStart
+            )
             currentTimeMs += travelDuration
           }
         } else {
-          // Null-safe fallback: if endPoint/startPoint missing → use 140ms default pause
           currentTimeMs += INTER_STROKE_PAUSE_MS
         }
       } else if (steps.length > 0) {
-        // Intra-glyph pause (between strokes of same letter) — educational pause
+        const previousGlyph = composed[previousStep.glyphIndex]
+        const previousEnd = getWorldStrokePoint(previousGlyph, previousStep.stroke, true)
+        const currentStart = getWorldStrokePoint(glyph, stroke as unknown as Stroke, false)
+        if (previousEnd && currentStart) {
+          transition = createTransition(
+            `${glyph.hb.glyphId}-stroke-lift-${stroke.order ?? steps.length}`,
+            'lift',
+            currentTimeMs,
+            INTER_STROKE_PAUSE_MS,
+            previousEnd,
+            currentStart
+          )
+        }
         currentTimeMs += INTER_STROKE_PAUSE_MS
       }
 
@@ -140,10 +322,18 @@ export function buildTimeline(
         glyphIndex: i,
         stroke: stroke as unknown as Stroke,
         isDot,
-        startMs: currentTimeMs,
-        endMs: currentTimeMs + durationMs
+        transition,
+        // A connected handoff is an overlap, not a blank interval. Start the
+        // next stroke when the bridge starts so its ink advances while the
+        // cursor travels to the next glyph.
+        startMs: transition?.kind === 'bridge' ? transition.startMs : currentTimeMs,
+        endMs:
+          (transition?.kind === 'bridge' ? transition.startMs : currentTimeMs) + durationMs
       })
-      currentTimeMs += durationMs
+      currentTimeMs = Math.max(
+        currentTimeMs,
+        (transition?.kind === 'bridge' ? transition.startMs : currentTimeMs) + durationMs
+      )
     }
   }
 
@@ -220,6 +410,8 @@ export class AnimationEngine {
     }
   }
 
+  private stepCursor: number = 0
+
   private startRaf(): void {
     if (this.rafId !== null) return // already running
     this.lastTimeMs = 0 // flag for first frame
@@ -229,8 +421,9 @@ export class AnimationEngine {
       }
       const rawDelta = time - this.lastTimeMs
       this.lastTimeMs = time
-      // Clamp delta to prevent jerky jumps from dropped frames or background tab throttles
-      const delta = Math.min(Math.max(rawDelta, 0), 33)
+      // Use real elapsed time so slow frames do not artificially stretch playback duration.
+      // Cap at 250ms to prevent huge jumps when the tab is backgrounded or during freeze.
+      const delta = Math.min(Math.max(rawDelta, 0), 250)
       this.tick(delta)
       if (this.rafId !== null) {
         this.rafId = requestAnimationFrame(loop)
@@ -240,33 +433,85 @@ export class AnimationEngine {
   }
 
   private updateCurrentStepFromProgress(): void {
-    // Determine currentStep based on progressMs. During an inter-stroke pause,
-    // keep the next step selected so the step controls do not jump back to the
-    // stroke that has already finished.
-    for (let i = 0; i < this.timeline.steps.length; i++) {
-      const step = this.timeline.steps[i]
-      const nextStep = this.timeline.steps[i + 1]
-      if (
-        this.state.progressMs >= step.startMs &&
-        this.state.progressMs < step.endMs
-      ) {
-        this.state.currentStep = i
+    const steps = this.timeline.steps
+    const n = steps.length
+    if (n === 0) {
+      this.state.currentStep = 0
+      return
+    }
+
+    const progress = this.state.progressMs
+    if (progress >= this.timeline.totalDurationMs) {
+      this.state.currentStep = Math.max(0, n - 1)
+      this.stepCursor = this.state.currentStep
+      return
+    }
+
+    // 1. Fast sequential check from cached step cursor
+    let cur = this.stepCursor
+    if (cur >= 0 && cur < n) {
+      const step = steps[cur]
+      const nextStep = steps[cur + 1]
+
+      if (progress >= step.startMs && progress < step.endMs) {
+        this.state.currentStep = cur
         return
       }
 
-      if (
-        nextStep &&
-        this.state.progressMs >= step.endMs &&
-        this.state.progressMs < nextStep.startMs
-      ) {
-        this.state.currentStep = i + 1
+      if (nextStep && progress >= step.endMs && progress < nextStep.startMs) {
+        this.state.currentStep = cur + 1
+        this.stepCursor = cur + 1
         return
       }
+
+      // Check if advancing sequentially forward by one or few steps
+      if (cur + 1 < n && progress >= steps[cur + 1].startMs) {
+        cur++
+        while (cur < n) {
+          const s = steps[cur]
+          const ns = steps[cur + 1]
+          if (progress >= s.startMs && progress < s.endMs) {
+            this.state.currentStep = cur
+            this.stepCursor = cur
+            return
+          }
+          if (ns && progress >= s.endMs && progress < ns.startMs) {
+            this.state.currentStep = cur + 1
+            this.stepCursor = cur + 1
+            return
+          }
+          if (ns && progress >= ns.startMs) {
+            cur++
+          } else {
+            break
+          }
+        }
+      }
     }
-    // If we're exactly at the end or beyond
-    if (this.state.progressMs >= this.timeline.totalDurationMs) {
-      this.state.currentStep = Math.max(0, this.timeline.steps.length - 1)
+
+    // 2. Binary search fallback for backward jumps or arbitrary seeks
+    let low = 0
+    let high = n - 1
+    let found = 0
+    while (low <= high) {
+      const mid = (low + high) >> 1
+      const step = steps[mid]
+      if (progress < step.startMs) {
+        high = mid - 1
+      } else if (progress >= step.endMs) {
+        const next = steps[mid + 1]
+        if (next && progress < next.startMs) {
+          found = mid + 1
+          break
+        }
+        low = mid + 1
+      } else {
+        found = mid
+        break
+      }
     }
+    this.state.currentStep = Math.min(n - 1, Math.max(0, found))
+    this.stepCursor = this.state.currentStep
   }
 
   private tick(delta: number): void {
@@ -336,6 +581,7 @@ export class AnimationEngine {
       if (this.state.progressMs >= this.timeline.totalDurationMs) {
         this.state.progressMs = 0
         this.state.currentStep = 0
+        this.stepCursor = 0
       } else {
         this.updateCurrentStepFromProgress()
       }
@@ -364,6 +610,7 @@ export class AnimationEngine {
       // if we are at the end, restart from beginning for play
       this.state.progressMs = 0
       this.state.currentStep = 0
+      this.stepCursor = 0
       this.state.isComplete = false
     }
 
@@ -464,6 +711,7 @@ export class AnimationEngine {
   public reset(): void {
     this.stopRaf()
     this.queuedStep = false
+    this.stepCursor = 0
     this.state = {
       mode: 'idle',
       currentStep: 0,

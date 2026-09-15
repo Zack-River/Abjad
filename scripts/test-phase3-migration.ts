@@ -9,7 +9,7 @@
  * 5. Multi-glyph words (كتاب, ببب, باب).
  * 6. Combining marks and tashkeel (بِ, مُحَمَّد).
  * 7. Ligatures and extended contexts (لا, قراءة, بيئة).
- * 8. Unsupported glyph handling (شمس: zero animated strokes, no fabricated geometry).
+ * 8. Regression coverage for formerly unsupported Arabic text (شمس).
  * 9. Strict byte-identical SVG determinism (identical markup & mask IDs across renders).
  * 10. Frozen dataset SHA-256 integrity (verified reference & candidate files unchanged).
  * 11. App.css untouched integrity.
@@ -27,6 +27,14 @@ import { composeText } from '../src/renderer/src/engine/composition/glyph-compos
 import { composeCandidateFixture } from '../src/renderer/src/engine/composition/candidate-fixture-composer'
 import { buildTimeline } from '../src/renderer/src/engine/animation/animation-engine'
 import { initHarfBuzz } from '../src/renderer/src/engine/shaping/harfbuzz'
+import { setupEngine } from '../src/renderer/src/engine'
+import {
+  CANONICAL_EDITOR_BRUSH_SIZES,
+  CANONICAL_HAMZA_PATH,
+  CANONICAL_KAF_PATHS,
+  CANONICAL_LETTER_PATHS,
+  CANONICAL_MULTI_STROKE_LETTER_PATHS
+} from '../src/renderer/src/engine/data/canonical-stroke-paths'
 import verifiedCandidates from '../src/renderer/src/assets/candidates/arabic-strokes.candidates.json'
 import { ArabicStrokeDataset, CandidateEntry, VerifiedInventory, LetterEntry } from './types'
 
@@ -56,6 +64,709 @@ async function runPhase3Tests(): Promise<void> {
   console.log('=================================================================\n')
 
   await initHarfBuzz()
+
+  // The Glyph State Source of Truth editor uses this exact contextual setup
+  // for the connected-left ت form. Guard against falling back to the old
+  // hardcoded GID 21 stroke when the candidate map has no entry for that GID.
+  const taInitialSetup = setupEngine('تب', {
+    allowUnverifiedFallback: true,
+    connectGlyphs: true,
+    targetGlyphIndex: 0
+  })
+  const taInitialStroke = taInitialSetup.glyphs.find((glyph) => glyph.semanticRole === 'base')?.orderedStrokes[0]
+  assert(
+    taInitialStroke?.medianPath === 'M 144.5 -388.2 C 276.4 -49.9, 156.1 -32.2, 8.7 -39.2',
+    'Connected-left ت resolves the canonical GID 21 path'
+  )
+
+  const baaIsolatedSetup = setupEngine('ب', { allowUnverifiedFallback: true })
+  const baaIsolatedGlyph = baaIsolatedSetup.glyphs.find((glyph) => glyph.semanticRole === 'base')
+  assert(
+    baaIsolatedGlyph?.orderedStrokes[0]?.medianPath ===
+      'M 851.8 -387.7 C 910.3 -186.5, 1027.2 -11.1, 428.5 -22.8 C 70.7 -34.5, 42.7 -60.3, 91.8 -331.5' &&
+      baaIsolatedGlyph.orderedStrokes[1]?.medianPath === 'M 504.0 120.3 L 464.0 202.4',
+    'Isolated ب resolves the supplied body and dot paths'
+  )
+
+  const taaIsolatedPaths = setupEngine('ت', { allowUnverifiedFallback: true }).glyphs
+    .find((glyph) => glyph.semanticRole === 'base')
+    ?.orderedStrokes.map((stroke) => stroke.medianPath)
+  assert(
+    taaIsolatedPaths !== undefined &&
+      taaIsolatedPaths.includes('M 574.3 -491.8 L 534.3 -409.6') &&
+      taaIsolatedPaths.includes('M 438.7 -491.8 L 398.7 -409.6'),
+    'Isolated ت resolves both supplied dot paths'
+  )
+
+  const sharedBaaPaths = {
+    isolated:
+      'M 851.8 -387.7 C 910.3 -186.5, 1027.2 -11.1, 428.5 -22.8 C 70.7 -34.5, 42.7 -60.3, 91.8 -331.5',
+    initial: 'M 123.3 -385.3 C 233.3 -64.9, 156.1 -32.2, 8.7 -39.2',
+    medial:
+      'M 391.8 -38.8 C 136.5 5.6, 189.7 -167.6, 192 -278.6 C 165.3 -16.6, 105.4 -54.4, 5.5 -41',
+    final:
+      'M 1142.2 -36.6 C 867.1 -16.1, 917.6 -154.2, 951.3 -226.7 C 716.2 80.9, -118.7 66.9, 92.1 -325.2'
+  } as const
+  const taaPaths = {
+    ...sharedBaaPaths,
+    initial: 'M 144.5 -388.2 C 276.4 -49.9, 156.1 -32.2, 8.7 -39.2',
+    medial:
+      'M 422.3 -40 C 119.2 -2, 206.2 -229.8, 217.4 -278.2 C 178.1 -67.6, 141.6 -43.4, 5.5 -41',
+    final:
+      'M 1142.2 -36.6 C 923.2 -19.2, 889.5 -112.5, 948.5 -229.8 C 914.8 -22.7, -123.6 163.7, 95.3 -333.4'
+  } as const
+  for (const [char, initialWord, medialWord, finalWord] of [
+    ['ب', 'بب', 'ببب', 'بب'],
+    ['ت', 'تب', 'بتب', 'بت'],
+    ['ث', 'ثب', 'بثب', 'بث']
+  ] as const) {
+    const isolated = setupEngine(char, { allowUnverifiedFallback: true }).glyphs.find(
+      (glyph) => glyph.semanticRole === 'base'
+    )
+    const initial = setupEngine(initialWord, {
+      allowUnverifiedFallback: true,
+      connectGlyphs: true,
+      targetGlyphIndex: 0
+    }).glyphs.find((glyph) => glyph.baseChar === char)
+    const medial = setupEngine(medialWord, {
+      allowUnverifiedFallback: true,
+      connectGlyphs: true,
+      targetGlyphIndex: 1
+    }).glyphs.find((glyph) => glyph.baseChar === char)
+    const final = setupEngine(finalWord, {
+      allowUnverifiedFallback: true,
+      connectGlyphs: true,
+      targetGlyphIndex: 1
+    }).glyphs.find((glyph) => glyph.baseChar === char)
+    const expectedPaths = char === 'ب' ? sharedBaaPaths : taaPaths
+    assert(
+      isolated?.orderedStrokes[0]?.medianPath === expectedPaths.isolated &&
+        initial?.orderedStrokes[0]?.medianPath === expectedPaths.initial &&
+        medial?.orderedStrokes[0]?.medianPath === expectedPaths.medial &&
+        final?.orderedStrokes[0]?.medianPath === expectedPaths.final,
+      `${char} uses the supplied shared body path in all four states`
+    )
+  }
+
+  for (const [char, initialWord, medialWord, finalWord] of [
+    ['ص', 'صب', 'بصب', 'بص'],
+    ['ض', 'ضب', 'بضب', 'بض']
+  ] as const) {
+    const isolated = setupEngine(char, { allowUnverifiedFallback: true }).glyphs.find(
+      (glyph) => glyph.semanticRole === 'base'
+    )
+    const initial = setupEngine(initialWord, {
+      allowUnverifiedFallback: true,
+      connectGlyphs: true,
+      targetGlyphIndex: 0
+    }).glyphs.find((glyph) => glyph.baseChar === char)
+    const medial = setupEngine(medialWord, {
+      allowUnverifiedFallback: true,
+      connectGlyphs: true,
+      targetGlyphIndex: 1
+    }).glyphs.find((glyph) => glyph.baseChar === char)
+    const final = setupEngine(finalWord, {
+      allowUnverifiedFallback: true,
+      connectGlyphs: true,
+      targetGlyphIndex: 1
+    }).glyphs.find((glyph) => glyph.baseChar === char)
+    const expectedPaths = CANONICAL_LETTER_PATHS[char]
+    assert(
+      isolated?.orderedStrokes[0]?.medianPath === expectedPaths.isolated &&
+        isolated?.orderedStrokes.length === (char === 'ض' ? 2 : 1) &&
+        initial?.orderedStrokes[0]?.medianPath === expectedPaths.initial &&
+        medial?.orderedStrokes[0]?.medianPath === expectedPaths.medial &&
+        final?.orderedStrokes[0]?.medianPath === expectedPaths.final &&
+        CANONICAL_EDITOR_BRUSH_SIZES[char]?.isolated === 80,
+      `${char} uses the supplied SAD-family paths in all four states without the obsolete isolated step`
+    )
+  }
+
+  for (const [char, initialWord, medialWord, finalWord] of [
+    ['ط', 'طب', 'بطب', 'بط'],
+    ['ظ', 'ظب', 'بظب', 'بظ']
+  ] as const) {
+    const expected = CANONICAL_MULTI_STROKE_LETTER_PATHS[char]
+    const isolated = setupEngine(char, { allowUnverifiedFallback: true }).glyphs.find(
+      (glyph) => glyph.semanticRole === 'base'
+    )
+    const initial = setupEngine(initialWord, {
+      allowUnverifiedFallback: true,
+      connectGlyphs: true,
+      targetGlyphIndex: 0
+    }).glyphs.find((glyph) => glyph.baseChar === char)
+    const medial = setupEngine(medialWord, {
+      allowUnverifiedFallback: true,
+      connectGlyphs: true,
+      targetGlyphIndex: 1
+    }).glyphs.find((glyph) => glyph.baseChar === char)
+    const final = setupEngine(finalWord, {
+      allowUnverifiedFallback: true,
+      connectGlyphs: true,
+      targetGlyphIndex: 1
+    }).glyphs.find((glyph) => glyph.baseChar === char)
+    const matches = (glyph, state) =>
+      glyph?.orderedStrokes.map((stroke) => stroke.medianPath).join('|') ===
+        expected[state].map((stroke) => stroke.medianPath).join('|') &&
+      glyph?.orderedStrokes.map((stroke) => stroke.direction).join('|') ===
+        expected[state].map((stroke) => stroke.direction).join('|')
+    assert(
+      matches(isolated, 'isolated') &&
+        matches(initial, 'initial') &&
+        matches(medial, 'medial') &&
+        matches(final, 'final') &&
+        CANONICAL_EDITOR_BRUSH_SIZES[char]?.isolated === 80,
+      `${char} uses the canonical two-stroke TAH-family sequence in all four states`
+    )
+  }
+
+  for (const [char, initialWord, medialWord, finalWord] of [
+    ['ع', 'عب', 'بعب', 'بع'],
+    ['غ', 'غب', 'بغب', 'بغ']
+  ] as const) {
+    const expected = CANONICAL_LETTER_PATHS[char]
+    const bodyStrokes = (glyph) =>
+      glyph?.orderedStrokes.filter((stroke) => !stroke.isCandidateDot && stroke.type !== 'dot') || []
+    const isolated = setupEngine(char, { allowUnverifiedFallback: true }).glyphs.find(
+      (glyph) => glyph.baseChar === char
+    )
+    const initial = setupEngine(initialWord, {
+      allowUnverifiedFallback: true,
+      connectGlyphs: true,
+      targetGlyphIndex: 0
+    }).glyphs.find((glyph) => glyph.baseChar === char)
+    const medial = setupEngine(medialWord, {
+      allowUnverifiedFallback: true,
+      connectGlyphs: true,
+      targetGlyphIndex: 1
+    }).glyphs.find((glyph) => glyph.baseChar === char)
+    const final = setupEngine(finalWord, {
+      allowUnverifiedFallback: true,
+      connectGlyphs: true,
+      targetGlyphIndex: 1
+    }).glyphs.find((glyph) => glyph.baseChar === char)
+    assert(
+      bodyStrokes(isolated)[0]?.medianPath === expected.isolated &&
+        bodyStrokes(initial)[0]?.medianPath === expected.initial &&
+        bodyStrokes(medial)[0]?.medianPath === expected.medial &&
+        bodyStrokes(final)[0]?.medianPath === expected.final &&
+        CANONICAL_EDITOR_BRUSH_SIZES[char]?.isolated === 80 &&
+        CANONICAL_EDITOR_BRUSH_SIZES[char]?.['left-connected'] === 80 &&
+        CANONICAL_EDITOR_BRUSH_SIZES[char]?.['right-connected'] === 80 &&
+        CANONICAL_EDITOR_BRUSH_SIZES[char]?.['both-connected'] === 80,
+      `${char} uses the canonical AIN-family body path in all four states`
+    )
+    if (char === 'غ') {
+      assert(
+        [isolated, initial, medial, final].every(
+          (glyph) => glyph?.orderedStrokes.filter((stroke) => stroke.isCandidateDot || stroke.type === 'dot').length === 1
+        ),
+        'GHAIN retains one independent upper dot in every state'
+      )
+    }
+  }
+
+  const faaPaths = CANONICAL_LETTER_PATHS.ف
+  const faaIsolated = setupEngine('ف', { allowUnverifiedFallback: true }).glyphs.find(
+    (glyph) => glyph.baseChar === 'ف'
+  )
+  const faaInitial = setupEngine('فب', {
+    allowUnverifiedFallback: true,
+    connectGlyphs: true,
+    targetGlyphIndex: 0
+  }).glyphs.find((glyph) => glyph.baseChar === 'ف')
+  const faaMedial = setupEngine('بفب', {
+    allowUnverifiedFallback: true,
+    connectGlyphs: true,
+    targetGlyphIndex: 1
+  }).glyphs.find((glyph) => glyph.baseChar === 'ف')
+  const faaFinal = setupEngine('بف', {
+    allowUnverifiedFallback: true,
+    connectGlyphs: true,
+    targetGlyphIndex: 1
+  }).glyphs.find((glyph) => glyph.baseChar === 'ف')
+  const faaBody = (glyph) =>
+    glyph?.orderedStrokes.find((stroke) => !stroke.isCandidateDot && stroke.type !== 'dot')
+  assert(
+    faaBody(faaIsolated)?.medianPath === faaPaths.isolated &&
+      faaBody(faaInitial)?.medianPath === faaPaths.initial &&
+      faaBody(faaMedial)?.medianPath === faaPaths.medial &&
+      faaBody(faaFinal)?.medianPath === faaPaths.final &&
+      faaIsolated?.orderedStrokes.some(
+        (stroke) => stroke.isCandidateDot && stroke.medianPath === faaPaths.dotPaths?.[0]
+      ) === true &&
+      CANONICAL_EDITOR_BRUSH_SIZES.ف?.isolated === 80 &&
+      CANONICAL_EDITOR_BRUSH_SIZES.ق?.isolated === 80,
+    'FAA uses the supplied four-state paths and isolated dot'
+  )
+
+  const qafInitial = setupEngine('قب', {
+    allowUnverifiedFallback: true,
+    connectGlyphs: true,
+    targetGlyphIndex: 0
+  }).glyphs.find((glyph) => glyph.baseChar === 'ق')
+  const qafMedial = setupEngine('بقب', {
+    allowUnverifiedFallback: true,
+    connectGlyphs: true,
+    targetGlyphIndex: 1
+  }).glyphs.find((glyph) => glyph.baseChar === 'ق')
+  assert(
+    faaBody(qafInitial)?.medianPath === faaPaths.initial &&
+      faaBody(qafMedial)?.medianPath === faaPaths.medial,
+    'QAF uses the shared FAA connected body paths'
+  )
+
+  const jheemPaths = {
+    isolated:
+      'M 38.3 -357.2 C 227.2 -419.3, 323.4 -312.3, 568.5 -291.6 C -20.3 -291.6, -214.8 543.9, 584.5 305.7',
+    initial:
+      'M 60.3 -298.5 C 335.3 -346.8, 349.3 -205.2, 549.4 -193.2 C 391.4 -201.8, 251.1 -18.8, 3.2 -37.7',
+    medial: [
+      'M 688.9 -40.3 C 537.3 -26.5, 489.6 -67.9, 447.5 -130',
+      'M 63.1 -302.3 C 296.8 -371.1, 427.9 -167.7, 559.8 -191.9 C 366.2 -188.4, 180.9 -8.9, 6.9 -40'
+    ],
+    final: [
+      'M 699.1 -33.1 C 533.1 -36.8, 429.3 -71.4, 440.5 -223.3',
+      'M 36.4 -354.1 C 185.1 -419.7, 364.8 -292, 578 -295.4 C -258.3 -150.4, 8.3 550.4, 581.9 302.1'
+    ]
+  } as const
+  for (const [char, initialWord, medialWord, finalWord] of [
+    ['ج', 'جب', 'بجب', 'بج'],
+    ['ح', 'حب', 'بحب', 'بح'],
+    ['خ', 'خب', 'بخب', 'بخ']
+  ] as const) {
+    const isolated = setupEngine(char, { allowUnverifiedFallback: true }).glyphs.find(
+      (glyph) => glyph.baseChar === char
+    )
+    const initial = setupEngine(initialWord, {
+      allowUnverifiedFallback: true,
+      connectGlyphs: true,
+      targetGlyphIndex: 0
+    }).glyphs.find((glyph) => glyph.baseChar === char)
+    const medial = setupEngine(medialWord, {
+      allowUnverifiedFallback: true,
+      connectGlyphs: true,
+      targetGlyphIndex: 1
+    }).glyphs.find((glyph) => glyph.baseChar === char)
+    const final = setupEngine(finalWord, {
+      allowUnverifiedFallback: true,
+      connectGlyphs: true,
+      targetGlyphIndex: 1
+    }).glyphs.find((glyph) => glyph.baseChar === char)
+    assert(
+      isolated?.orderedStrokes[0]?.medianPath === jheemPaths.isolated &&
+        initial?.orderedStrokes[0]?.medianPath === jheemPaths.initial &&
+        medial?.orderedStrokes.slice(0, 2).map((stroke) => stroke.medianPath).join('|') ===
+          jheemPaths.medial.join('|') &&
+        final?.orderedStrokes.slice(0, 2).map((stroke) => stroke.medianPath).join('|') ===
+          jheemPaths.final.join('|'),
+      `${char} uses the supplied JHEEM-family paths in all four states`
+    )
+  }
+
+  const noonIsolatedSetup = setupEngine('ن', { allowUnverifiedFallback: true })
+  const noonIsolatedStroke = noonIsolatedSetup.glyphs.find((glyph) => glyph.semanticRole === 'base')?.orderedStrokes[0]
+  assert(
+    noonIsolatedStroke?.medianPath === 'M 519.7 -296.4 C 840.1 342.1, -123.4 332.7, 101.1 -163.1',
+    'Isolated ن resolves the canonical GID 80 path'
+  )
+  const noonIsolatedPaths = noonIsolatedSetup.glyphs.flatMap((glyph) =>
+    glyph.orderedStrokes.map((stroke) => stroke.medianPath)
+  )
+  assert(
+    noonIsolatedPaths.includes('M 349.6 -488.5 L 309.6 -406.3'),
+    'Isolated ن resolves the supplied dot path'
+  )
+
+  const noonFinalSetup = setupEngine('بن', {
+    allowUnverifiedFallback: true,
+    connectGlyphs: true,
+    targetGlyphIndex: 1
+  })
+  const noonFinalGlyph = noonFinalSetup.glyphs.find(
+    (glyph) => glyph.semanticRole === 'base' && glyph.baseChar === 'ن'
+  )
+  assert(
+    noonFinalGlyph?.orderedStrokes.length === 1 &&
+      noonFinalGlyph.orderedStrokes[0]?.medianPath ===
+        'M 781.7 -38.2 C 594.9 -9.2, 566.8 -188.7, 547.8 -272.1 C 816.6 380.9, -148.8 294.6, 109.4 -157.7',
+    'Final ن uses only the canonical body stroke'
+  )
+
+  const yaaIsolatedSetup = setupEngine('ي', { allowUnverifiedFallback: true })
+  const yaaIsolatedPaths = yaaIsolatedSetup.glyphs.flatMap((glyph) =>
+    glyph.orderedStrokes.map((stroke) => stroke.medianPath)
+  )
+  assert(
+    yaaIsolatedPaths.includes(
+      'M 729.6 -353.7 C 569.6 -457.3, 232.9 -184.5, 558.4 -87.9 C 996.2 77.8, -92.7 505.9, 103.8 -156.9'
+    ),
+    'Isolated ي resolves the supplied canonical body path'
+  )
+  assert(
+    yaaIsolatedPaths.includes('M 446.3 329.5 L 406.3 411.7') &&
+      yaaIsolatedPaths.includes('M 307.7 329.5 L 267.7 411.7'),
+    'Isolated ي resolves both supplied canonical dot paths'
+  )
+
+  const yaaInitialSetup = setupEngine('يب', {
+    allowUnverifiedFallback: true,
+    connectGlyphs: true
+  })
+  const yaaInitialGlyph = yaaInitialSetup.glyphs.find((glyph) => glyph.baseChar === 'ي')
+  assert(
+    yaaInitialGlyph?.orderedStrokes[0]?.medianPath ===
+      'M 147.3 -388.2 C 175.3 -329.5, 315.6 -1.6, 9.7 -36.1',
+    'Connected-left ي resolves the supplied canonical initial path'
+  )
+
+  const yaaMedialSetup = setupEngine('بيب', {
+    allowUnverifiedFallback: true,
+    connectGlyphs: true
+  })
+  const yaaMedialGlyph = yaaMedialSetup.glyphs.find((glyph) => glyph.baseChar === 'ي')
+  assert(
+    yaaMedialGlyph?.orderedStrokes[0]?.medianPath ===
+      'M 422.3 -40 C 200.6 -2, 178.1 -122.8, 223 -278.2 C 186.5 -60.7, 169.7 -46.9, 5.5 -41',
+    'Both-connected ي resolves the supplied canonical medial path'
+  )
+
+  const yaaFinalSetup = setupEngine('بي', {
+    allowUnverifiedFallback: true,
+    connectGlyphs: true
+  })
+  const yaaFinalGlyph = yaaFinalSetup.glyphs.find((glyph) => glyph.baseChar === 'ي')
+  assert(
+    yaaFinalGlyph?.orderedStrokes[0]?.medianPath ===
+      'M 788.5 -43.4 C 687.5 -8.9, 656.6 -67.6, 488.2 -102.1 C 1114.1 108.5, -134.8 474.4, 103.8 -160.8',
+    'Connected-right ي resolves the supplied canonical final path'
+  )
+  assert(
+    CANONICAL_EDITOR_BRUSH_SIZES.ي['both-connected'] === 80 &&
+      CANONICAL_EDITOR_BRUSH_SIZES.ئ['both-connected'] === 80 &&
+      CANONICAL_EDITOR_BRUSH_SIZES.ى['both-connected'] === 80,
+    'YAA-family medial editor previews use brush size 80'
+  )
+  assert(
+    ['ب', 'ت', 'ث', 'ن', 'ي'].every(
+      (char) => CANONICAL_EDITOR_BRUSH_SIZES[char]?.['both-connected'] === 80
+    ),
+    'Shared dotted-medial family previews use brush size 80'
+  )
+  assert(
+    ['ب', 'ت', 'ث'].every(
+      (char) => CANONICAL_EDITOR_BRUSH_SIZES[char]?.['right-connected'] === 80
+    ),
+    'BAA/TAA/THAA right-connected previews use brush size 80'
+  )
+  assert(
+    CANONICAL_EDITOR_BRUSH_SIZES.ن['right-connected'] === 80,
+    'NOON right-connected preview uses brush size 80'
+  )
+
+  const kafIsolatedSetup = setupEngine('ك', { allowUnverifiedFallback: true })
+  const kafIsolatedGlyph = kafIsolatedSetup.glyphs.find((glyph) => glyph.semanticRole === 'base')
+  assert(
+    kafIsolatedGlyph?.orderedStrokes.map((stroke) => stroke.medianPath).join('|') ===
+      CANONICAL_KAF_PATHS.isolated.join('|'),
+    'Isolated K resolves the canonical two-stroke sequence'
+  )
+  assert(
+    kafIsolatedGlyph?.definition?.outlinePath?.includes('M390 21') === true &&
+      kafIsolatedGlyph.orderedStrokes.every((stroke) => stroke.outlinePath?.includes('M390 21')),
+    'Isolated K keeps the complete verified shadow outline'
+  )
+
+  const kafInitialSetup = setupEngine('كب', {
+    allowUnverifiedFallback: true,
+    connectGlyphs: true,
+    targetGlyphIndex: 0
+  })
+  const kafInitialGlyph = kafInitialSetup.glyphs.find((glyph) => glyph.baseChar === 'ك')
+  assert(
+    kafInitialGlyph?.orderedStrokes.length === 1 &&
+      kafInitialGlyph.orderedStrokes[0]?.medianPath === CANONICAL_KAF_PATHS.initial,
+    'Connected-left K resolves the canonical initial path'
+  )
+
+  const kafMedialSetup = setupEngine('بكب', {
+    allowUnverifiedFallback: true,
+    connectGlyphs: true,
+    targetGlyphIndex: 1
+  })
+  const kafMedialGlyph = kafMedialSetup.glyphs.find((glyph) => glyph.baseChar === 'ك')
+  assert(
+    kafMedialGlyph?.orderedStrokes.length === 1 &&
+      kafMedialGlyph.orderedStrokes[0]?.medianPath === CANONICAL_KAF_PATHS.medial,
+    'Both-connected K resolves the canonical medial path'
+  )
+
+  const kafFinalSetup = setupEngine('بك', {
+    allowUnverifiedFallback: true,
+    connectGlyphs: true,
+    targetGlyphIndex: 1
+  })
+  const kafFinalGlyph = kafFinalSetup.glyphs.find((glyph) => glyph.baseChar === 'ك')
+  assert(
+    kafFinalGlyph?.orderedStrokes.length === 2 &&
+      kafFinalGlyph.orderedStrokes[0]?.medianPath === CANONICAL_KAF_PATHS.finalBody &&
+      kafFinalGlyph.orderedStrokes[1]?.medianPath === CANONICAL_KAF_PATHS.finalMark,
+    'Connected-right K resolves the canonical body followed by its upper mark'
+  )
+  assert(
+    kafFinalGlyph?.definition?.outlinePath?.includes('M 390 21') === true &&
+      kafFinalGlyph.definition.outlinePath.includes('M 364 -204') === true &&
+      kafFinalGlyph.orderedStrokes[0]?.outlinePath?.includes('M 390 21') === true &&
+      kafFinalGlyph.orderedStrokes[1]?.outlinePath?.includes('M 364 -204') === true,
+    'Connected-right K keeps both the body and upper-mark shadow outlines'
+  )
+  assert(
+    CANONICAL_EDITOR_BRUSH_SIZES.ك.isolated === 80 &&
+      CANONICAL_EDITOR_BRUSH_SIZES.ك['left-connected'] === 80 &&
+      CANONICAL_EDITOR_BRUSH_SIZES.ك['right-connected'] === 80 &&
+      CANONICAL_EDITOR_BRUSH_SIZES.ك['both-connected'] === 80,
+    'K editor previews use the global brush size for all states'
+  )
+
+  const lamStates = [
+    ['isolated', 'ل', 0, CANONICAL_LETTER_PATHS.ل.isolated],
+    ['left-connected', 'لب', 0, CANONICAL_LETTER_PATHS.ل.initial],
+    ['both-connected', 'بلب', 1, CANONICAL_LETTER_PATHS.ل.medial],
+    ['right-connected', 'بل', 1, CANONICAL_LETTER_PATHS.ل.final]
+  ] as const
+  for (const [label, word, targetGlyphIndex, expectedPath] of lamStates) {
+    const lamGlyph = setupEngine(word, {
+      allowUnverifiedFallback: true,
+      connectGlyphs: true,
+      targetGlyphIndex
+    }).glyphs.find((glyph) => glyph.baseChar === 'ل')
+    assert(
+      lamGlyph?.orderedStrokes.length === 1 &&
+        lamGlyph.orderedStrokes[0]?.medianPath === expectedPath,
+      `Lam ${label} uses the supplied single canonical stroke`
+    )
+  }
+
+  const meemStates = [
+    ['isolated', 'م', 0, CANONICAL_LETTER_PATHS.م.isolated],
+    ['left-connected', 'مب', 0, CANONICAL_LETTER_PATHS.م.initial],
+    ['both-connected', 'بمب', 1, CANONICAL_LETTER_PATHS.م.medial],
+    ['right-connected', 'بم', 1, CANONICAL_LETTER_PATHS.م.final]
+  ] as const
+  for (const [label, word, targetGlyphIndex, expectedPath] of meemStates) {
+    const meemGlyph = setupEngine(word, {
+      allowUnverifiedFallback: true,
+      connectGlyphs: true,
+      targetGlyphIndex
+    }).glyphs.find((glyph) => glyph.baseChar === 'م')
+    assert(
+      meemGlyph?.orderedStrokes.length === 1 &&
+        meemGlyph.orderedStrokes[0]?.medianPath === expectedPath,
+      `Meem ${label} uses the supplied single canonical stroke`
+    )
+  }
+  assert(
+    CANONICAL_EDITOR_BRUSH_SIZES.م.isolated === 80 &&
+      CANONICAL_EDITOR_BRUSH_SIZES.م['left-connected'] === 80 &&
+      CANONICAL_EDITOR_BRUSH_SIZES.م['right-connected'] === 80 &&
+      CANONICAL_EDITOR_BRUSH_SIZES.م['both-connected'] === 80,
+    'Meem editor previews use the supplied brush sizes'
+  )
+
+  const haaStates = [
+    ['isolated', 'ه', 0, CANONICAL_LETTER_PATHS.ه.isolated],
+    ['left-connected', 'هب', 0, CANONICAL_LETTER_PATHS.ه.initial],
+    ['both-connected', 'بهب', 1, CANONICAL_LETTER_PATHS.ه.medial],
+    ['right-connected', 'به', 1, CANONICAL_LETTER_PATHS.ه.final]
+  ] as const
+  for (const [label, word, targetGlyphIndex, expectedPath] of haaStates) {
+    const haaGlyph = setupEngine(word, {
+      allowUnverifiedFallback: true,
+      connectGlyphs: true,
+      targetGlyphIndex
+    }).glyphs.find((glyph) => glyph.baseChar === 'ه')
+    assert(
+      haaGlyph?.orderedStrokes.length === 1 &&
+        haaGlyph.orderedStrokes[0]?.medianPath === expectedPath,
+      `Haa ${label} uses the supplied single canonical stroke`
+    )
+  }
+  assert(
+    CANONICAL_EDITOR_BRUSH_SIZES.ه.isolated === 80 &&
+      CANONICAL_EDITOR_BRUSH_SIZES.ه['left-connected'] === 80 &&
+      CANONICAL_EDITOR_BRUSH_SIZES.ه['right-connected'] === 80 &&
+      CANONICAL_EDITOR_BRUSH_SIZES.ه['both-connected'] === 80,
+    'Haa editor previews use the supplied brush sizes'
+  )
+
+  const alifStates = [
+    ['isolated', 'ا', 0, CANONICAL_LETTER_PATHS.ا.isolated],
+    ['left-connected', 'اب', 0, CANONICAL_LETTER_PATHS.ا.initial],
+    ['both-connected', 'باب', 1, CANONICAL_LETTER_PATHS.ا.medial],
+    ['right-connected', 'با', 1, CANONICAL_LETTER_PATHS.ا.final]
+  ] as const
+  for (const [label, word, targetGlyphIndex, expectedPath] of alifStates) {
+    const alifGlyph = setupEngine(word, {
+      allowUnverifiedFallback: true,
+      connectGlyphs: true,
+      targetGlyphIndex
+    }).glyphs.find((glyph) => glyph.baseChar === 'ا')
+    assert(
+      alifGlyph?.orderedStrokes.length === 1 &&
+        alifGlyph.orderedStrokes[0]?.medianPath === expectedPath,
+      `Alif ${label} uses the supplied single canonical stroke`
+    )
+  }
+  assert(
+    CANONICAL_EDITOR_BRUSH_SIZES.ا.isolated === 80 &&
+      CANONICAL_EDITOR_BRUSH_SIZES.ا['left-connected'] === 80 &&
+      CANONICAL_EDITOR_BRUSH_SIZES.ا['right-connected'] === 80 &&
+      CANONICAL_EDITOR_BRUSH_SIZES.ا['both-connected'] === 80,
+    'Alif editor previews use the supplied brush sizes'
+  )
+  for (const [char, expectedExtraStrokes] of [
+    ['أ', 1],
+    ['إ', 1],
+    ['آ', 1]
+  ] as const) {
+    const alifVariant = setupEngine(char, { allowUnverifiedFallback: true }).glyphs.find(
+      (glyph) => glyph.baseChar === char
+    )
+    assert(
+      alifVariant?.orderedStrokes[0]?.medianPath === CANONICAL_LETTER_PATHS.ا.isolated &&
+        alifVariant.orderedStrokes.length === expectedExtraStrokes + 1 &&
+        CANONICAL_EDITOR_BRUSH_SIZES[char]?.isolated === 80,
+      `${char} uses the canonical Alif body while preserving its marks`
+    )
+  }
+
+  for (const [label, word, expectedPath] of [
+    ['Connected-left ئ', 'ئب', 'M 147.3 -388.2 C 175.3 -329.5, 315.6 -1.6, 9.7 -36.1'],
+    ['Both-connected ئ', 'بئب', 'M 422.3 -40 C 200.6 -2, 178.1 -122.8, 223 -278.2 C 186.5 -60.7, 169.7 -46.9, 5.5 -41'],
+    ['Connected-right ئ', 'بئ', 'M 788.5 -43.4 C 687.5 -8.9, 656.6 -67.6, 488.2 -102.1 C 1114.1 108.5, -134.8 474.4, 103.8 -160.8']
+  ] as const) {
+    const stateIndex = word.startsWith('ب') ? 1 : 0
+    const setup = setupEngine(word, {
+      allowUnverifiedFallback: true,
+      connectGlyphs: true,
+      targetGlyphIndex: stateIndex
+    })
+    const glyph = setup.glyphs.find((item) => item.baseChar === 'ئ')
+    assert(glyph?.orderedStrokes[0]?.medianPath === expectedPath, `${label} resolves the canonical YAA body path`)
+  }
+
+  const dotlessYaa = setupEngine('ى', { allowUnverifiedFallback: true }).glyphs.find(
+    (glyph) => glyph.baseChar === 'ى'
+  )
+  assert(
+    dotlessYaa?.orderedStrokes.length === 1 &&
+      dotlessYaa.orderedStrokes[0]?.medianPath === CANONICAL_LETTER_PATHS.ي.isolated,
+    'Dotless Yaa reuses the canonical dotted-Yaa body without dot strokes'
+  )
+  const hamzaYaa = setupEngine('ئ', { allowUnverifiedFallback: true }).glyphs.find(
+    (glyph) => glyph.baseChar === 'ئ'
+  )
+  assert(
+    Boolean(
+      hamzaYaa?.orderedStrokes.some((stroke) => stroke.medianPath === CANONICAL_LETTER_PATHS.ي.isolated) &&
+        hamzaYaa.orderedStrokes.some((stroke) => stroke.medianPath === CANONICAL_HAMZA_PATH)
+    ),
+    'Hamza-Yaa reuses the canonical dotted-Yaa body and shared Hamza movement'
+  )
+
+  const baaFinalSetup = setupEngine('بب', {
+    allowUnverifiedFallback: true,
+    connectGlyphs: true,
+    targetGlyphIndex: 1
+  })
+  const baaFinalGlyph = baaFinalSetup.glyphs.find((glyph) => glyph.baseChar === 'ب')
+  assert(
+    baaFinalGlyph?.orderedStrokes[0]?.medianPath ===
+      'M 1142.2 -36.6 C 867.1 -16.1, 917.6 -154.2, 951.3 -226.7 C 716.2 80.9, -118.7 66.9, 92.1 -325.2',
+    'Right-connected ب resolves the shared canonical final path'
+  )
+  for (const [char, word] of [
+    ['ت', 'بت'],
+    ['ث', 'بث']
+  ] as const) {
+    const setup = setupEngine(word, {
+      allowUnverifiedFallback: true,
+      connectGlyphs: true,
+      targetGlyphIndex: 1
+    })
+    const finalGlyph = setup.glyphs.find((glyph) => glyph.baseChar === char)
+    assert(
+      finalGlyph?.orderedStrokes[0]?.medianPath ===
+        'M 1142.2 -36.6 C 923.2 -19.2, 889.5 -112.5, 948.5 -229.8 C 914.8 -22.7, -123.6 163.7, 95.3 -333.4',
+      `Right-connected ${char} resolves the shared canonical final path`
+    )
+  }
+
+  const hamzaIsolatedSetup = setupEngine('ء', { allowUnverifiedFallback: true })
+  const hamzaIsolatedGlyph = hamzaIsolatedSetup.glyphs.find(
+    (glyph) => glyph.semanticRole === 'base' || glyph.semanticRole === 'hamza'
+  )
+  assert(
+    hamzaIsolatedGlyph?.orderedStrokes.length === 1 &&
+      hamzaIsolatedGlyph.orderedStrokes[0]?.medianPath === CANONICAL_HAMZA_PATH,
+    'Isolated HAMZA uses the supplied single canonical stroke'
+  )
+  for (const char of ['أ', 'إ', 'ؤ', 'ئ']) {
+    const setup = setupEngine(char, { allowUnverifiedFallback: true })
+    const glyph = setup.glyphs.find((item) => item.semanticRole === 'base')
+    assert(
+      glyph?.orderedStrokes.filter((stroke) => stroke.medianPath === CANONICAL_HAMZA_PATH).length === 1,
+      `${char} uses the shared canonical Hamza stroke`
+    )
+  }
+  for (const word of ['أب', 'إب', 'ؤب', 'ئب']) {
+    const setup = setupEngine(word, { allowUnverifiedFallback: true, connectGlyphs: true })
+    const hamzaGlyph = setup.glyphs.find((glyph) => glyph.semanticRole === 'hamza')
+    assert(
+      hamzaGlyph?.orderedStrokes.length === 1 &&
+        hamzaGlyph.orderedStrokes[0]?.medianPath === CANONICAL_HAMZA_PATH,
+      `${word} uses the shared canonical Hamza glyph stroke`
+    )
+  }
+
+  for (const word of ['زياد', 'ياد']) {
+    const setup = setupEngine(word, { allowUnverifiedFallback: true, connectGlyphs: true })
+    assert(setup.skippedGlyphs.length === 0, `${word} has no skipped glyphs`)
+    assert(
+      setup.glyphs.some((glyph) => glyph.baseChar === 'د' && glyph.orderedStrokes.length > 0),
+      `${word} resolves the final right-joining letter`
+    )
+  }
+
+  for (const [word, expectedGlyphIds] of [
+    ['لا', [73, 10]],
+    ['للا', [72, 71, 11]],
+    ['لآ', [73, 10, 300]],
+    ['آ', [12, 300]]
+  ] as const) {
+    const fullSetup = setupEngine(word, { allowUnverifiedFallback: true, connectGlyphs: true })
+    assert(
+      fullSetup.skippedGlyphs.length === 0 &&
+        fullSetup.glyphs.map((glyph) => glyph.glyphId).join(',') === expectedGlyphIds.join(','),
+      `${word} resolves every special glyph without skipping`
+    )
+  }
+
+  for (const [word, expectedGlyphIds] of [
+    ['لا', [73, 10]],
+    ['للا', [71, 11]]
+  ] as const) {
+    const letterModeSetup = setupEngine(word, {
+      allowUnverifiedFallback: true,
+      connectGlyphs: true,
+      targetGlyphIndex: word === 'لا' ? 0 : 1
+    })
+    assert(
+      letterModeSetup.glyphs.map((glyph) => glyph.glyphId).join(',') === expectedGlyphIds.join(',') &&
+        letterModeSetup.timeline.steps.length > 0,
+      `${word} remains a complete ligature when selected as one letter-mode item`
+    )
+  }
 
   // -------------------------------------------------------------
   // TEST 1: All 72 Verified Fixtures Render Through renderSvg
@@ -115,11 +826,12 @@ async function runPhase3Tests(): Promise<void> {
   // Inspect stroke median coordinates
   const boatStroke = baaGlyph.orderedStrokes.find((s) => s.order === 0)
   assert(boatStroke !== undefined, `Found boat stroke (order 0)`)
-  assert(boatStroke!.startPoint?.x === 883.2, `Boat startPoint.x is 883.2 (local font units)`)
-  assert(boatStroke!.startPoint?.y === -393.53, `Boat startPoint.y is -393.53 (local font units)`)
+  assert(boatStroke!.startPoint?.x === 851.8, `Boat startPoint.x is 851.8 (local font units)`)
+  assert(boatStroke!.startPoint?.y === -387.7, `Boat startPoint.y is -387.7 (local font units)`)
 
   // Render SVG and verify mask stamp coordinates
   const timelineBaa = buildTimeline(compBaa.glyphs)
+  const svgBaaInitial = renderSvg(compBaa.glyphs, timelineBaa, 0)
   const svgBaa = renderSvg(compBaa.glyphs, timelineBaa, timelineBaa.totalDurationMs / 2)
   assert(svgBaa.includes('maskUnits="userSpaceOnUse"'), `Mask uses maskUnits="userSpaceOnUse"`)
   assert(
@@ -127,8 +839,8 @@ async function runPhase3Tests(): Promise<void> {
     `Mask uses maskContentUnits="userSpaceOnUse"`
   )
   assert(
-    svgBaa.includes('transform="translate(883.2 -393.53)'),
-    `Stamp 0 is located exactly at local font coordinates (883.2, -393.53)`
+    svgBaa.includes('transform="translate(851.8 -387.7)'),
+    `Stamp 0 is located exactly at local font coordinates (851.8, -387.7)`
   )
 
   // -------------------------------------------------------------
@@ -137,7 +849,7 @@ async function runPhase3Tests(): Promise<void> {
   console.log('\n--- TEST 3: Coordinate-Space Failure Prevention ---')
   // 1. No median path rendered at root without group transform
   assert(
-    !svgBaa.includes('<path d="M 883.2" class="median-path" fill="none" />\n      </svg>'),
+    !svgBaa.includes('<path d="M 851.8" class="median-path" fill="none" />\n      </svg>'),
     `Median path is not dumped untransformed at root stage`
   )
   // 2. Word group has single outer transform
@@ -154,6 +866,10 @@ async function runPhase3Tests(): Promise<void> {
   assert(
     svgBaa.includes(`class="ink-outline" mask="url(#mask-g0-s0)"`),
     `Ink outline is masked via local font space mask`
+  )
+  assert(
+    svgBaaInitial.includes(`class="ink-outline" mask="url(#mask-g0-s0)"`),
+    `Initial frame mounts masked ink geometry for incremental mask updates`
   )
 
   // -------------------------------------------------------------
@@ -270,11 +986,15 @@ async function runPhase3Tests(): Promise<void> {
     const comp = composeText(word)
     const timeline = buildTimeline(comp.glyphs)
     const svg = renderSvg(comp.glyphs, timeline, timeline.totalDurationMs)
+    const debugSvg = renderSvg(comp.glyphs, timeline, timeline.totalDurationMs, '', {
+      includeMedianLayer: true
+    })
 
     assert(comp.glyphs.length >= 3, `"${word}" composed into ${comp.glyphs.length} glyphs`)
     assert(svg.includes('class="glyph-ghost"'), `"${word}" renders ghost outlines`)
     assert(svg.includes('class="glyph-ink"'), `"${word}" renders ink layers`)
-    assert(svg.includes('class="glyph-median"'), `"${word}" renders median layers`)
+    assert(!svg.includes('id="median-layer"'), `"${word}" omits debug median paths by default`)
+    assert(debugSvg.includes('class="glyph-median"'), `"${word}" renders median paths when requested`)
 
     // Verify each glyph has its own distinct group transform
     for (let i = 0; i < comp.glyphs.length; i++) {
@@ -343,28 +1063,33 @@ async function runPhase3Tests(): Promise<void> {
         'candidate-dot-complete'
       )
       assert(
-        partialSvg.includes('candidate-dot-partial-mask-g0-s1-dot-progress-clip'),
+        partialSvg.includes('candidate-dot-partial-mask-g0-s1-progress-clip'),
         `Partial dot render uses deterministic progress clip`
       )
       assert(
-        partialSvg.includes('clip-path="url(#candidate-dot-partial-mask-g0-s1-dot-progress-clip)"'),
+        partialSvg.includes('clip-path="url(#candidate-dot-partial-mask-g0-s1-progress-clip)"'),
         `Dot mask stamps are clipped to traveled progress at partial time`
       )
 
       const dotStampLayerMatch = partialSvg.match(/<g class="dot-mask-stamps"[^>]*>([\s\S]*?)<\/g>/)
       const dotStampAxes = dotStampLayerMatch
         ? Array.from(
-            dotStampLayerMatch[1].matchAll(/<ellipse[^>]* rx="([^"]+)" ry="([^"]+)"/g)
+            dotStampLayerMatch[1].matchAll(/<rect[^>]* x="([^"]+)" y="([^"]+)" width="([^"]+)" height="([^"]+)"/g)
           ).map((m) => ({
-            rx: Number(m[1]),
-            ry: Number(m[2])
+            width: Number(m[3]),
+            height: Number(m[4])
           }))
         : []
-      const narrowestDotAxis = Math.min(...dotStampAxes.flatMap((axis) => [axis.rx, axis.ry]))
+      const widestDotAxis = Math.max(...dotStampAxes.flatMap((axis) => [axis.width, axis.height]))
+      const widestDotBrush = Math.max(...dotStampAxes.map((axis) => axis.width))
       assert(dotStampAxes.length > 0, `Partial dot render emits dot mask brush stamps`)
       assert(
-        narrowestDotAxis >= 100,
-        `Dot mask brush is wide enough to fill dot outlines instead of drawing line segments (min axis ${narrowestDotAxis})`
+        widestDotAxis >= 100,
+        `Dot mask brush height is 100 units for vertical fill (max axis ${widestDotAxis})`
+      )
+      assert(
+        widestDotBrush <= 8,
+        `Dot mask brush width stays narrow to avoid sideways overpainting (max width ${widestDotBrush})`
       )
       assert(
         !completeSvg.includes('dot-progress-clip'),
@@ -386,34 +1111,48 @@ async function runPhase3Tests(): Promise<void> {
   }
 
   // -------------------------------------------------------------
-  // TEST 9: Unsupported Glyph Handling (شمس)
+  // TEST 9: Formerly Unsupported Arabic Coverage (شمس)
   // -------------------------------------------------------------
-  console.log('\n--- TEST 9: Unsupported Glyph Handling (شمس) ---')
+  console.log('\n--- TEST 9: Formerly Unsupported Arabic Coverage (شمس) ---')
   const compShams = composeText('شمس')
-  assert(compShams.isFullySupported === false, `"شمس" is flagged as NOT fully supported`)
-  assert(compShams.unsupportedCount === 1, `"شمس" has exactly 1 unsupported glyph (final seen)`)
-
-  const unsupportedSeen = compShams.glyphs.find((g) => !g.isSupported)
-  assert(unsupportedSeen !== undefined, `Found unsupported glyph (GID ${unsupportedSeen?.glyphId})`)
+  assert(compShams.isFullySupported === true, `"شمس" is fully supported without fallback`)
+  assert(compShams.unsupportedCount === 0, `"شمس" has no unsupported glyphs`)
   assert(
-    unsupportedSeen!.orderedStrokes.length === 0,
-    `Unsupported glyph has ZERO animated strokes`
+    compShams.glyphs.every((glyph) => glyph.orderedStrokes.length > 0),
+    `Every shaped "شمس" glyph has animated strokes`
   )
-  assert(unsupportedSeen!.definition === null, `Unsupported glyph has null definition`)
+  assert(
+    compShams.glyphs.every((glyph) => glyph.definition?.provenance !== 'unverified_fallback'),
+    `"شمس" resolves without unverified fallback geometry`
+  )
 
   const timelineShams = buildTimeline(compShams.glyphs)
   const svgShams = renderSvg(compShams.glyphs, timelineShams, timelineShams.totalDurationMs)
-  // Supported glyphs must render
-  assert(svgShams.includes('class="ink-outline"'), `Supported glyphs in "شمس" rendered ink`)
-  // Unsupported glyph must NOT have ink masks
-  const unsupportedGlyphIndex = compShams.glyphs.indexOf(unsupportedSeen!)
-  assert(
-    !svgShams.includes(`mask-g${unsupportedGlyphIndex}-`),
-    `Unsupported glyph has ZERO mask elements`
-  )
+  assert(svgShams.includes('class="ink-outline"'), `"شمس" renders canonical ink`)
 
   // -------------------------------------------------------------
-  // TEST 10: Strict Byte-Identical SVG Determinism
+  // TEST 10: Long Marked Word Replay Coverage
+  // -------------------------------------------------------------
+  console.log('\n--- TEST 10: Long Marked Word Replay Coverage ---')
+  const stressWord = 'مُسْتَشَارَاتِيُّونَ'
+  const compStress = composeText(stressWord)
+  assert(compStress.isFullySupported === true, `"${stressWord}" has no unsupported glyphs`)
+  assert(compStress.unsupportedCount === 0, `"${stressWord}" has zero skipped glyphs`)
+  assert(
+    compStress.glyphs.some(
+      (glyph) => glyph.glyphId === 80 && glyph.definition?.provenance === 'canonical_runtime'
+    ),
+    `"${stressWord}" resolves isolated noon GID 80 canonically`
+  )
+  assert(
+    compStress.glyphs.some((glyph) => glyph.glyphId === 281 && glyph.semanticRole === 'dot'),
+    `"${stressWord}" keeps the noon dot as a separate mark`
+  )
+  const stressTimeline = buildTimeline(compStress.glyphs)
+  assert(stressTimeline.steps.length > 0, `"${stressWord}" produces replayable timeline steps`)
+
+  // -------------------------------------------------------------
+  // TEST 11: Strict Byte-Identical SVG Determinism
   // -------------------------------------------------------------
   console.log('\n--- TEST 10: Strict Byte-Identical SVG Determinism ---')
   const compDet = composeText('مُحَمَّد')
@@ -432,7 +1171,7 @@ async function runPhase3Tests(): Promise<void> {
   assert(svgRun1.includes('mask-g0-s0'), `Mask IDs are deterministic and session-independent`)
 
   // -------------------------------------------------------------
-  // TEST 11: Frozen Datasets SHA-256 Integrity
+  // TEST 12: Frozen Datasets SHA-256 Integrity
   // -------------------------------------------------------------
   console.log('\n--- TEST 11: Frozen Datasets SHA-256 Integrity ---')
   const EXPECTED_GOLDEN_HASH = '7cb3754490ba7e1a5dcf4c719d53659a9b1db4650ba194493781f193802731a0'
@@ -459,7 +1198,7 @@ async function runPhase3Tests(): Promise<void> {
   )
 
   // -------------------------------------------------------------
-  // TEST 12: App.css Untouched Integrity
+  // TEST 13: App.css Untouched Integrity
   // -------------------------------------------------------------
   console.log('\n--- TEST 12: App.css Untouched Integrity ---')
   const appCssPath = 'src/renderer/src/App.css'
@@ -476,24 +1215,61 @@ async function runPhase3Tests(): Promise<void> {
     `Studio board initial state starts at zero ink progress`
   )
   assert(
+    studioViewSource.includes('xmlns:xlink="http://www.w3.org/1999/xlink"'),
+    `Standalone export SVG declares the xlink namespace used by SVG use elements`
+  )
+  assert(
     !studioViewSource.includes('setShowFullPreview(true)'),
     `Studio board does not force the full ink layer before playback`
   )
-
-  // -------------------------------------------------------------
-  // TEST 13: animation-engine.ts Regression Hash
-  // -------------------------------------------------------------
-  console.log('\n--- TEST 13: animation-engine.ts Regression Hash ---')
-  const EXPECTED_ANIMATION_ENGINE_HASH =
-    'dbd2f9398b3f64b2b2c6a70e52ddc8bad10ed2075336a015939bf91bf64bd7bf'
-  const actualAnimationEngineHash = sha256('src/renderer/src/engine/animation/animation-engine.ts')
   assert(
-    actualAnimationEngineHash === EXPECTED_ANIMATION_ENGINE_HASH,
-    `animation-engine.ts matches the intentional regression baseline (${actualAnimationEngineHash.slice(0, 16)}...)`
+    studioViewSource.includes('const canvasPixelScale = 1'),
+    `Animated exports rasterize at the selected output resolution without redundant 2x oversampling`
   )
 
   // -------------------------------------------------------------
-  // TEST 14: Trusted Geometry Source Verification (Zero Legacy Access)
+  // TEST 14: Animation Clock and Cursor Regression Guard
+  // -------------------------------------------------------------
+  console.log('\n--- TEST 13: Animation Clock and Cursor Regression Guard ---')
+  const animationEngineSource = fs.readFileSync(
+    'src/renderer/src/engine/animation/animation-engine.ts',
+    'utf8'
+  )
+  assert(
+    !animationEngineSource.includes('Math.min(Math.max(rawDelta, 0), 33)'),
+    `Animation clock does not reintroduce the 33ms slow-frame clamp`
+  )
+  assert(
+    animationEngineSource.includes('private stepCursor'),
+    `Animation engine retains its bidirectional timeline cursor`
+  )
+  const tegakiBoardSource = fs.readFileSync(
+    'src/renderer/src/components/TegakiBoard.jsx',
+    'utf8'
+  )
+  assert(
+    tegakiBoardSource.includes('const isReplayStart ='),
+    `Live board explicitly detects replay from the completed timeline`
+  )
+  assert(
+    tegakiBoardSource.includes('activeStrokeCursorRef.current = 0'),
+    `Live board resets its active stroke cursor before replay synchronization`
+  )
+  assert(
+    tegakiBoardSource.includes('sd.stampGroup.replaceChildren(headGroup)'),
+    `Live board reattaches each head stamp after clearing a replay mask`
+  )
+  assert(
+    tegakiBoardSource.includes("fill(showFullPreview ? 999999 : -1)"),
+    `Live board tracks an empty mask with a distinct pre-stamp cursor`
+  )
+  assert(
+    studioViewSource.includes('currentEngineState.isComplete'),
+    `Play control explicitly resets a completed timeline before replay`
+  )
+
+  // -------------------------------------------------------------
+  // TEST 15: Trusted Geometry Source Verification (Zero Legacy Access)
   // -------------------------------------------------------------
   console.log('\n--- TEST 14: Trusted Geometry Source Verification ---')
   const svgRendererPath = 'src/renderer/src/engine/renderer/svg-renderer.ts'

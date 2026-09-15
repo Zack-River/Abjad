@@ -11,9 +11,18 @@ import {
   buildTimeline,
   AnimationTimeline,
   SpeedLevel,
-  SPEED_MULTIPLIERS
+  SPEED_MULTIPLIERS,
+  getBridgeHandoffProgress
 } from './animation/animation-engine'
-import { renderSvg } from './renderer/svg-renderer'
+import {
+  renderSvg,
+  prepareRenderScene,
+  renderSvgFrame,
+  PreparedRenderScene,
+  getBrushSquareGeometry,
+  GLOBAL_BRUSH_SCALE,
+  DEFAULT_STROKE_WEIGHT
+} from './renderer/svg-renderer'
 import {
   composeCandidateFixture,
   setupCandidateFixture
@@ -72,7 +81,13 @@ export {
   setupCandidateFixture,
   buildTimeline,
   renderSvg,
+  prepareRenderScene,
+  renderSvgFrame,
+  getBrushSquareGeometry,
+  GLOBAL_BRUSH_SCALE,
+  DEFAULT_STROKE_WEIGHT,
   AnimationEngine,
-  SPEED_MULTIPLIERS
+  SPEED_MULTIPLIERS,
+  getBridgeHandoffProgress
 }
-export type { ComposedGlyph, SpeedLevel }
+export type { ComposedGlyph, SpeedLevel, PreparedRenderScene }

@@ -20,9 +20,33 @@ const api = {
     filename: string,
     format: 'gif' | 'mp4'
   ) => ipcRenderer.invoke('save-export-file', { data, directory, filename, format }),
-  cancelMediaExport: (exportId: string) => ipcRenderer.invoke('cancel-media-export', exportId),
+  startExportStream: async (request: {
+    exportId: string
+    format: 'gif' | 'mp4'
+    width: number
+    height: number
+    fps: number
+    videoBitrate?: number
+    directory: string
+    filename: string
+    endHoldDurationSeconds?: number
+  }) => {
+    return ipcRenderer.invoke('start-export-stream', request)
+  },
+  writeExportFrame: (request: { exportId: string; frameData: ArrayBuffer | Uint8Array }) =>
+    ipcRenderer.invoke('write-export-frame', request),
+  finishExportStream: async (request: { exportId: string }) => {
+    return ipcRenderer.invoke('finish-export-stream', request)
+  },
+  cancelExportStream: async (exportId: string) => {
+    return ipcRenderer.invoke('cancel-export-stream', exportId)
+  },
+  cancelMediaExport: async (exportId: string) => {
+    return ipcRenderer.invoke('cancel-media-export', exportId)
+  },
   onMediaProgress: (listener: (progress: number) => void) => {
-    const handler = (_event: Electron.IpcRendererEvent, progress: number) => listener(progress)
+    const handler = (_event: Electron.IpcRendererEvent, progress: number): void =>
+      listener(progress)
     ipcRenderer.on('media-conversion-progress', handler)
     return () => ipcRenderer.removeListener('media-conversion-progress', handler)
   }

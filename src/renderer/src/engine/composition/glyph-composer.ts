@@ -1,16 +1,16 @@
 import { HbGlyph, shapeText } from '../shaping/harfbuzz'
 import { strokeRegistry, TrustedStrokeDefinition, StrokeItem } from '../data/stroke-registry'
+import { orderDotItems } from '../data/stroke-normalizer'
 
 /**
  * Semantic roles used for calligraphic animation sequencing within an Arabic cluster.
  *
- * Order within each cluster:
- * 1. Base/body strokes
- * 2. Dots belonging to that letter
- * 3. Hamza marks
- * 4. Bottom-line tashkeel (e.g. kasra, kasratan)
- * 5. Top-line tashkeel level 1 (e.g. shadda)
- * 6. Top-line tashkeel level 2 (e.g. fatha, damma, sukun)
+ * Word order:
+ * 1. Each logical letter body
+ * 2. Dots and hamza marks belonging to that letter
+ * 3. The next logical letter
+ * 4. After all letters, marks in logical letter order
+ * 5. Within one letter, lower marks precede upper marks
  */
 export type SemanticRole =
   'base' | 'dot' | 'hamza' | 'tashkeel_bottom' | 'tashkeel_top_1' | 'tashkeel_top_2'
@@ -18,7 +18,7 @@ export type SemanticRole =
 export const ROLE_ORDER: Record<SemanticRole, number> = {
   base: 1,
   dot: 2,
-  hamza: 3,
+  hamza: 2,
   tashkeel_bottom: 4,
   tashkeel_top_1: 5,
   tashkeel_top_2: 6
@@ -244,18 +244,6 @@ function markAnchor(glyph: ComposedGlyph): { x: number; y: number } {
   }
 }
 
-function markQuadrant(glyph: ComposedGlyph, centerX: number): number {
-  const anchor = markAnchor(glyph)
-  const isRight = anchor.x >= centerX
-  const isBottom = anchor.y >= 0
-
-  // Educational mark order: bottom-right, top-right, top-left, bottom-left.
-  if (isBottom && isRight) return 0
-  if (!isBottom && isRight) return 1
-  if (!isBottom && !isRight) return 2
-  return 3
-}
-
 export type AnimationPhase = 'base' | 'dots' | 'marks'
 
 /**
@@ -452,6 +440,7 @@ export function composeGlyphs(
       // Contextual / word glyph lookup strictly by glyphId
       definition = strokeRegistry.resolve({
         glyphId: hb.glyphId,
+        sourceChar: baseChar,
         isIsolated: false
       })
 
@@ -550,42 +539,85 @@ export function composeGlyphs(
     targetCluster = logicalBaseGlyphs[options.targetGlyphIndex]?.cluster
   }
 
+  // HarfBuzz assigns separate clusters to the base glyphs inside an Arabic
+  // ligature. Letter mode still treats the ligature as one educational item,
+  // so selecting its first cluster must retain the following ligature base
+  // glyphs and any marks attached to the final cluster.
+  let targetLigatureEndCluster = targetCluster ?? -1
+  if (targetCluster !== undefined) {
+    const orderedBaseGlyphs = composedGlyphs
+      .filter((glyph) => glyph.semanticRole === 'base')
+      .sort((a, b) => a.cluster - b.cluster || a.glyphX - b.glyphX)
+    const targetBaseIndex = orderedBaseGlyphs.findIndex((glyph) => glyph.cluster === targetCluster)
+    const targetBase = targetBaseIndex >= 0 ? orderedBaseGlyphs[targetBaseIndex] : undefined
+    if (targetBase?.glyphName.includes('.rlig')) {
+      targetLigatureEndCluster = targetBase.cluster
+      for (let index = targetBaseIndex + 1; index < orderedBaseGlyphs.length; index++) {
+        const nextBase = orderedBaseGlyphs[index]
+        if (!nextBase.glyphName.includes('.rlig')) break
+        targetLigatureEndCluster = nextBase.cluster
+      }
+    }
+  }
+
   const targetedGlyphs =
     targetCluster === undefined
       ? composedGlyphs
-      : composedGlyphs.filter((glyph) => glyph.cluster === targetCluster)
+      : composedGlyphs.filter((glyph) => {
+          if (glyph.cluster === targetCluster) return true
+          if (targetLigatureEndCluster === targetCluster || glyph.cluster > targetLigatureEndCluster) {
+            return false
+          }
+          return glyph.semanticRole === 'base' && glyph.glyphName.includes('.rlig')
+        })
 
-  // 5. Sort into global calligraphic animation phases:
-  // Draw every letter body first, then marks using their spatial priority.
-  // This makes an upper-right hamza precede a lower-left dot in "أب".
-  const markGlyphs = targetedGlyphs.filter((glyph) => glyph.semanticRole !== 'base')
-  const markAnchors = markGlyphs.map(markAnchor)
-  const markCenterX =
-    markAnchors.length > 0
-      ? (Math.min(...markAnchors.map((anchor) => anchor.x)) +
-          Math.max(...markAnchors.map((anchor) => anchor.x))) /
-        2
-      : 0
-  const sorted = [...targetedGlyphs].sort((a, b) => {
-    const aIsBase = a.semanticRole === 'base'
-    const bIsBase = b.semanticRole === 'base'
-    if (aIsBase !== bIsBase) {
-      return aIsBase ? -1 : 1
-    }
-    if (!aIsBase && !bIsBase) {
-      const quadrantDiff = markQuadrant(a, markCenterX) - markQuadrant(b, markCenterX)
-      if (quadrantDiff !== 0) return quadrantDiff
-    }
-    if (a.cluster !== b.cluster) {
-      return a.cluster - b.cluster
-    }
-    // Stable tie-breaker: preserve right-to-left positioning.
-    return a.glyphX - b.glyphX
-  })
+  // 5. Build the educational sequence by logical letter cluster:
+  // body -> that letter's dots/hamza -> next letter. Other combining marks
+  // are deferred until every letter body, dot, and hamza has been drawn.
+  const logicalGlyphs = [...targetedGlyphs].sort(
+    (a, b) => a.cluster - b.cluster || a.glyphX - b.glyphX
+  )
+  const clusterIds = Array.from(new Set(logicalGlyphs.map((glyph) => glyph.cluster))).sort(
+    (a, b) => a - b
+  )
+  const sorted: ComposedGlyph[] = []
+
+  for (const cluster of clusterIds) {
+    const clusterGlyphs = logicalGlyphs.filter((glyph) => glyph.cluster === cluster)
+    sorted.push(...clusterGlyphs.filter((glyph) => glyph.semanticRole === 'base'))
+    sorted.push(
+      ...orderDotItems(
+        clusterGlyphs.filter(
+          (glyph) => glyph.semanticRole === 'dot' || glyph.semanticRole === 'hamza'
+        ),
+        markAnchor
+      )
+    )
+  }
+
+  // Marks stay in the original letter order. Within one letter, lower marks
+  // are drawn before upper marks, then right-to-left as a stable tie-breaker.
+  for (const cluster of clusterIds) {
+    const marks = logicalGlyphs
+      .filter(
+        (glyph) =>
+          glyph.cluster === cluster &&
+          glyph.semanticRole !== 'base' &&
+          glyph.semanticRole !== 'dot' &&
+          glyph.semanticRole !== 'hamza'
+      )
+      .sort((a, b) => {
+        const anchorA = markAnchor(a)
+        const anchorB = markAnchor(b)
+        return anchorB.y - anchorA.y || anchorB.x - anchorA.x
+      })
+    sorted.push(...marks)
+  }
 
   // Letter mode can render a single contextual item in multiple passes while
   // preserving its original shaping context. This keeps body strokes ahead of
-  // attached dots, and dots ahead of combining marks, without changing outlines.
+  // attached dots/hamza marks, and attachments ahead of other combining marks,
+  // without changing outlines.
   const phase = options.animationPhase
   if (phase) {
     for (const glyph of sorted) {
@@ -598,7 +630,7 @@ export function composeGlyphs(
             : []
       } else if (phase === 'dots') {
         glyph.orderedStrokes =
-          glyph.semanticRole === 'dot'
+          glyph.semanticRole === 'dot' || glyph.semanticRole === 'hamza'
             ? glyph.orderedStrokes
             : glyph.semanticRole === 'base'
               ? glyph.orderedStrokes.filter(
