@@ -5,6 +5,7 @@ import {
   DEFAULT_STROKE_WEIGHT,
   getBridgeHandoffProgress,
   getBrushSquareGeometry,
+  getStepInkProgress,
   prepareRenderScene,
   renderSvgFrame
 } from '../engine'
@@ -168,12 +169,19 @@ function getPrecomputedCursor(cursorTimeline, progressMs) {
 
   const clampedProgress = Math.max(0, Math.min(1, stepProgress))
   const easedProgress = clampedProgress * clampedProgress * (3 - 2 * clampedProgress)
-  const pt = sd.pathProps.getPointAtLength(sd.length * easedProgress)
+  const terminalProgress = sd.step?.endProgress ?? 1
+  const pt = sd.pathProps.getPointAtLength(sd.length * easedProgress * terminalProgress)
   return {
     x: pt.x + sd.glyphX,
     y: pt.y + sd.glyphY,
     isLifted: false
   }
+}
+
+function placeTrackingCursor(cursorEl, position) {
+  cursorEl.setAttribute('transform', `translate(${fmtNum(position.x)}, ${fmtNum(position.y)})`)
+  cursorEl.setAttribute('visibility', position.isLifted ? 'hidden' : 'visible')
+  cursorEl.classList.toggle('pen-lifted', Boolean(position.isLifted))
 }
 
 /**
@@ -243,6 +251,30 @@ export default function TegakiBoard({
     return `<rect x="${fmtNum(-width / 2)}" y="${fmtNum(-height / 2)}" width="${fmtNum(width)}" height="${fmtNum(height)}" transform="translate(${fmtNum(point.x)} ${fmtNum(point.y)}) rotate(${fmtNum(angle)})" />`
   }
 
+  const updateContinuousMask = (stroke, continuousPath, prog, weight) => {
+    if (!continuousPath) return
+    const progress = clamp(prog)
+    const { height } = getBrushSquareGeometry(stroke, progress, weight)
+    const dashLength = Math.max(stroke.length * progress, 0.001)
+    continuousPath.setAttribute('stroke-width', fmtNum(height))
+    continuousPath.setAttribute(
+      'stroke-dasharray',
+      `${fmtNum(dashLength)} ${fmtNum(Math.max(stroke.length - dashLength, 0.001))}`
+    )
+  }
+
+  const restoreContinuousMask = (stroke, strokeDom, prog, weight) => {
+    if (!strokeDom?.continuousPath || !strokeDom.stampGroup) return
+    if (strokeDom.continuousPath.parentNode !== strokeDom.stampGroup) {
+      if (strokeDom.headEl) {
+        strokeDom.stampGroup.insertBefore(strokeDom.continuousPath, strokeDom.headEl)
+      } else {
+        strokeDom.stampGroup.appendChild(strokeDom.continuousPath)
+      }
+    }
+    updateContinuousMask(stroke, strokeDom.continuousPath, prog, weight)
+  }
+
   // 1. Mount static SVG tree when composition or dimensions change
   useEffect(() => {
     if (!hasGlyphs || !wrapperRef.current) return
@@ -257,6 +289,7 @@ export default function TegakiBoard({
         showBaseline,
         strokeWeight,
         includeMedianLayer: false,
+        centerVertically: true,
         stampSpacingScale: 1
       }
     )
@@ -279,6 +312,7 @@ export default function TegakiBoard({
           showBaseline,
           strokeWeight,
           includeMedianLayer: false,
+          centerVertically: true,
           stampSpacingScale: liveStampSpacingScale
         }
       )
@@ -337,10 +371,23 @@ export default function TegakiBoard({
       const maskEl = wrapperRef.current.querySelector(`#${stroke.maskId}`)
       const stampGroup = maskEl?.querySelector('.dot-mask-stamps, .body-mask-stamps')
       const clipPoly = wrapperRef.current.querySelector(`#${stroke.progressClipId} polygon`)
+      let continuousPath = stampGroup?.querySelector('.continuous-mask-path')
+      if (!continuousPath && stampGroup && stroke.continuousMask) {
+        continuousPath = document.createElementNS('http://www.w3.org/2000/svg', 'path')
+        continuousPath.setAttribute('class', 'continuous-mask-path')
+        continuousPath.setAttribute('d', stroke.medianPath)
+        continuousPath.setAttribute('fill', 'none')
+        continuousPath.setAttribute('stroke', '#fff')
+        continuousPath.setAttribute('stroke-linecap', 'butt')
+        continuousPath.setAttribute('stroke-linejoin', 'round')
+        stampGroup.appendChild(continuousPath)
+        updateContinuousMask(stroke, continuousPath, 0, scene.strokeWeight)
+      }
       return {
         maskEl,
         stampGroup,
         clipPoly,
+        continuousPath,
         headEl: null
       }
     })
@@ -359,7 +406,6 @@ export default function TegakiBoard({
     })
 
     const cursorEl = wrapperRef.current.querySelector('#tracking-cursor')
-
     domRefs.current = {
       ghostEl,
       strokeDoms,
@@ -377,8 +423,7 @@ export default function TegakiBoard({
     if (cursorEl && cursorTimelineRef.current) {
       const pos = getPrecomputedCursor(cursorTimelineRef.current, initialMs)
       if (pos) {
-        cursorEl.setAttribute('transform', `translate(${fmtNum(pos.x)}, ${fmtNum(pos.y)})`)
-        cursorEl.classList.toggle('pen-lifted', Boolean(pos.isLifted))
+        placeTrackingCursor(cursorEl, pos)
       }
     }
   }, [
@@ -422,10 +467,7 @@ export default function TegakiBoard({
 
           let prog = 0
           if (stroke.step) {
-            const duration = stroke.step.endMs - stroke.step.startMs
-            const t = currentMs - stroke.step.startMs
-            const linearT = clamp(duration > 0 ? t / duration : 0)
-            prog = linearT * linearT * (3 - 2 * linearT)
+            prog = getStepInkProgress(stroke.step, currentMs)
           } else if (currentMs > 0) {
             prog = 1
           }
@@ -438,6 +480,7 @@ export default function TegakiBoard({
             headGroup.setAttribute('class', 'head-stamp-group')
             sd.stampGroup.replaceChildren(headGroup)
             sd.headEl = headGroup
+            restoreContinuousMask(stroke, sd, 0, scene.strokeWeight)
             committed[sIdx] = -1
             if (sd.clipPoly) sd.clipPoly.removeAttribute('points')
           } else {
@@ -463,6 +506,7 @@ export default function TegakiBoard({
               if (poly) sd.clipPoly.setAttribute('points', poly)
               else sd.clipPoly.removeAttribute('points')
             }
+            restoreContinuousMask(stroke, sd, prog, scene.strokeWeight)
           }
         }
       } else {
@@ -477,19 +521,33 @@ export default function TegakiBoard({
           const stroke = strokes[sIdx]
           const sd = dom.strokeDoms[sIdx]
           const curCommitted = committed[sIdx] ?? -1
-          if (sd && curCommitted < stroke.fixedCount) {
-            let newStamps = ''
-            for (let i = curCommitted + 1; i <= stroke.fixedCount; i++) {
-              newStamps += buildStampHtml(stroke, i, scene.strokeWeight)
+          const terminalProgress = 1
+          const terminalCount = Math.min(
+            stroke.fixedCount,
+            Math.floor((stroke.length * terminalProgress) / stroke.spacing)
+          )
+          if (sd) {
+            if (curCommitted < terminalCount) {
+              let newStamps = ''
+              for (let i = curCommitted + 1; i <= terminalCount; i++) {
+                newStamps += buildStampHtml(stroke, i, scene.strokeWeight)
+              }
+              if (sd.headEl) {
+                sd.headEl.insertAdjacentHTML('beforebegin', newStamps)
+              } else if (sd.stampGroup) {
+                sd.stampGroup.insertAdjacentHTML('beforeend', newStamps)
+              }
             }
             if (sd.headEl) {
-              sd.headEl.insertAdjacentHTML('beforebegin', newStamps)
-              sd.headEl.innerHTML = ''
-            } else if (sd.stampGroup) {
-              sd.stampGroup.insertAdjacentHTML('beforeend', newStamps)
+              const lastFixed = Math.min(1, (terminalCount * stroke.spacing) / stroke.length)
+              sd.headEl.innerHTML =
+                terminalProgress > lastFixed
+                  ? buildHeadStampHtml(stroke, terminalProgress, scene.strokeWeight)
+                  : ''
             }
-            committed[sIdx] = stroke.fixedCount
+            committed[sIdx] = terminalCount
             if (sd.clipPoly) sd.clipPoly.removeAttribute('points')
+            updateContinuousMask(stroke, sd.continuousPath, terminalProgress, scene.strokeWeight)
           }
           activeStrokeCursorRef.current++
         }
@@ -502,14 +560,12 @@ export default function TegakiBoard({
           if (sd?.stampGroup) {
             let prog = 0
             if (stroke.step) {
-              const duration = stroke.step.endMs - stroke.step.startMs
-              const t = currentMs - stroke.step.startMs
-              const linearT = clamp(duration > 0 ? t / duration : 0)
-              prog = linearT * linearT * (3 - 2 * linearT)
+              prog = getStepInkProgress(stroke.step, currentMs)
             } else if (currentMs > 0) {
               prog = 1
             }
             prog = Math.max(prog, getBridgeHandoffProgress(stroke.step, currentMs))
+            updateContinuousMask(stroke, sd.continuousPath, prog, scene.strokeWeight)
 
             const curCommitted = committed[sIdx] ?? -1
             if (prog > 0 && prog < 1) {
@@ -567,8 +623,7 @@ export default function TegakiBoard({
       if (showTrackingCursor && dom.cursorEl && cursorTimelineRef.current) {
         const pos = getPrecomputedCursor(cursorTimelineRef.current, currentMs)
         if (pos) {
-          dom.cursorEl.setAttribute('transform', `translate(${fmtNum(pos.x)}, ${fmtNum(pos.y)})`)
-          dom.cursorEl.classList.toggle('pen-lifted', Boolean(pos.isLifted))
+          placeTrackingCursor(dom.cursorEl, pos)
         }
       }
     })

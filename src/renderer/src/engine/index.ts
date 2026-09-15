@@ -12,7 +12,9 @@ import {
   AnimationTimeline,
   SpeedLevel,
   SPEED_MULTIPLIERS,
-  getBridgeHandoffProgress
+  getBridgeHandoffProgress,
+  getStepInkProgress,
+  getStepStrokeProgress
 } from './animation/animation-engine'
 import {
   renderSvg,
@@ -21,7 +23,10 @@ import {
   PreparedRenderScene,
   getBrushSquareGeometry,
   GLOBAL_BRUSH_SCALE,
-  DEFAULT_STROKE_WEIGHT
+  DEFAULT_STROKE_WEIGHT,
+  DEFAULT_BRUSH_HEIGHT,
+  DEFAULT_DOT_BRUSH_HEIGHT,
+  BRUSH_WIDTH_TO_HEIGHT_RATIO
 } from './renderer/svg-renderer'
 import {
   composeCandidateFixture,
@@ -86,8 +91,13 @@ export {
   getBrushSquareGeometry,
   GLOBAL_BRUSH_SCALE,
   DEFAULT_STROKE_WEIGHT,
+  DEFAULT_BRUSH_HEIGHT,
+  DEFAULT_DOT_BRUSH_HEIGHT,
+  BRUSH_WIDTH_TO_HEIGHT_RATIO,
   AnimationEngine,
   SPEED_MULTIPLIERS,
-  getBridgeHandoffProgress
+  getBridgeHandoffProgress,
+  getStepInkProgress,
+  getStepStrokeProgress
 }
 export type { ComposedGlyph, SpeedLevel, PreparedRenderScene }

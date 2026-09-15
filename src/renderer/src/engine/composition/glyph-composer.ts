@@ -441,7 +441,9 @@ export function composeGlyphs(
       definition = strokeRegistry.resolve({
         glyphId: hb.glyphId,
         sourceChar: baseChar,
-        isIsolated: false
+        isIsolated: false,
+        glyphName: hb.glyphName,
+        isBaseGlyph: semanticRole === 'base'
       })
 
       if (!definition && options.allowUnverifiedFallback) {

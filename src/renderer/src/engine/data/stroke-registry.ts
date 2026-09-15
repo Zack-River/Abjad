@@ -177,6 +177,42 @@ function fitHamzaPathToOutline(medianPath: string, outlinePaths?: string[]): str
   return source && target ? transformMedianPath(medianPath, source, target) : medianPath
 }
 
+function isBareLetterGlyphName(glyphName: string): boolean {
+  return Boolean(glyphName) && !glyphName.includes('.rlig') && !/\.(?:init|medi|fina)(?:\.|$)/.test(glyphName)
+}
+
+function contextualizeIsolatedBody(
+  definition: TrustedStrokeDefinition,
+  sourceChar: string,
+  glyphId: number,
+  glyphName: string
+): TrustedStrokeDefinition {
+  const bodyStrokes = definition.strokes.filter(
+    (stroke) => !(stroke.isCandidateDot || stroke.type === 'dot')
+  )
+  const bodyOutlinePaths = bodyStrokes.flatMap((stroke) =>
+    stroke.outlinePaths?.length
+      ? stroke.outlinePaths
+      : stroke.outlinePath
+        ? [stroke.outlinePath]
+        : []
+  )
+
+  return {
+    ...definition,
+    id: `canonical_contextual_${sourceChar}_isolated`,
+    glyphId,
+    glyphName,
+    char: sourceChar,
+    isIsolatedLetter: false,
+    outlinePath: bodyOutlinePaths.join(' ') || definition.outlinePath,
+    outlinePaths: bodyOutlinePaths.length ? bodyOutlinePaths : definition.outlinePaths,
+    strokes: bodyStrokes,
+    sourceCategory: 'contextual',
+    provenance: 'canonical_runtime'
+  }
+}
+
 function canonicalStrokeSequence(
   paths: readonly { medianPath: string; direction: string }[],
   outlinePath: string
@@ -1991,8 +2027,10 @@ export class StrokeRegistry {
     glyphId: number
     sourceChar?: string
     isIsolated?: boolean
+    glyphName?: string
+    isBaseGlyph?: boolean
   }): TrustedStrokeDefinition | null {
-    const { glyphId, sourceChar, isIsolated } = params
+    const { glyphId, sourceChar, isIsolated, glyphName, isBaseGlyph } = params
 
     // 1. Explicit isolated letter resolution by character
     if (isIsolated === true) {
@@ -2048,6 +2086,22 @@ export class StrokeRegistry {
     if (sourceChar) {
       const contextualLetter = this.contextualLetterMap.get(`${sourceChar}:${glyphId}`)
       if (contextualLetter) return contextualLetter
+    }
+
+    // HarfBuzz emits a bare glyph name when a letter is isolated inside a
+    // word because the previous character cannot connect to it. Keep that
+    // valid isolated form canonical, but remove its owned dots because the
+    // shaped word emits those as separate mark glyphs.
+    if (isBaseGlyph && sourceChar && glyphName && isBareLetterGlyphName(glyphName)) {
+      const isolatedDefinition = this.letterMap.get(sourceChar)
+      if (isolatedDefinition) {
+        return contextualizeIsolatedBody(
+          isolatedDefinition,
+          sourceChar,
+          glyphId,
+          glyphName
+        )
+      }
     }
 
     // 3. Contextual / word glyph lookup by GID

@@ -1,10 +1,53 @@
 import assert from 'node:assert'
 import { svgPathProperties } from 'svg-path-properties'
 import { initHarfBuzz } from '../src/renderer/src/engine/shaping/harfbuzz'
-import { prepareRenderScene, renderSvgFrame, setupEngine, renderSvg } from '../src/renderer/src/engine'
+import {
+  buildTimeline,
+  getBrushSquareGeometry,
+  getStepInkProgress,
+  getStepStrokeProgress,
+  prepareRenderScene,
+  renderSvgFrame,
+  setupEngine,
+  renderSvg
+} from '../src/renderer/src/engine'
+import type { ComposedGlyph } from '../src/renderer/src/engine'
 
-function bodySteps(setup: ReturnType<typeof setupEngine>): ReturnType<typeof setupEngine>['timeline']['steps'] {
+function bodySteps(
+  setup: ReturnType<typeof setupEngine>
+): ReturnType<typeof setupEngine>['timeline']['steps'] {
   return setup.timeline.steps.filter((step) => !step.isDot)
+}
+
+function syntheticBaseGlyph(glyphId: number, glyphName: string, medianPath: string): ComposedGlyph {
+  return {
+    cluster: glyphId,
+    clusterStart: glyphId,
+    clusterEnd: glyphId + 1,
+    sourceSpan: '',
+    baseChar: '',
+    glyphId,
+    glyphName,
+    glyphX: 0,
+    glyphY: 0,
+    isSupported: true,
+    definition: null,
+    semanticRole: 'base',
+    orderedStrokes: [
+      {
+        order: 0,
+        outlinePath: '',
+        medianPath,
+        startPoint: null,
+        endPoint: null,
+        points: [],
+        pointsWithWidth: []
+      }
+    ],
+    hb: { glyphId } as ComposedGlyph['hb'],
+    cursorX: 0,
+    cursorY: 0
+  }
 }
 
 async function run(): Promise<void> {
@@ -47,7 +90,10 @@ async function run(): Promise<void> {
   )
   const nextMaskStart = handoffFrame.indexOf(`<mask id="${nextBodySceneStroke.maskId}"`)
   const nextMaskEnd = handoffFrame.indexOf('</mask>', nextMaskStart)
-  assert(nextMaskStart >= 0 && nextMaskEnd > nextMaskStart, 'next body mask is rendered during handoff')
+  assert(
+    nextMaskStart >= 0 && nextMaskEnd > nextMaskStart,
+    'next body mask is rendered during handoff'
+  )
   assert(
     handoffFrame.slice(nextMaskStart, nextMaskEnd).includes('<rect'),
     'bridge exposes the next body handoff brush stamp'
@@ -79,6 +125,41 @@ async function run(): Promise<void> {
     'separated-stroke mode does not create a bridge'
   )
 
+  const dottedConnected = setupEngine('ببب', {
+    allowUnverifiedFallback: true,
+    connectGlyphs: true
+  })
+  const dottedBodies = bodySteps(dottedConnected)
+  assert(
+    dottedBodies.slice(1).every((step) => step.transition?.kind === 'bridge'),
+    'body joins remain connected when a letter dot is animated between the two bodies'
+  )
+
+  const overshootingPair = buildTimeline(
+    [
+      syntheticBaseGlyph(9001, 'synthetic.init', 'M 0 0 L 140 0'),
+      syntheticBaseGlyph(9002, 'synthetic.fina', 'M 100 0 L 180 0')
+    ],
+    { connectGlyphs: true }
+  )
+  const overshootingStep = overshootingPair.steps[0]
+  assert(
+    Math.abs(overshootingStep.endProgress - 100 / 140) < 0.03,
+    'an overshooting terminal path stops at the following stroke start'
+  )
+  assert(
+    Math.abs(getStepStrokeProgress(overshootingStep, overshootingStep.endMs) - 100 / 140) < 0.03,
+    'the renderer-facing progress helper never reveals the overshooting tail'
+  )
+  assert(
+    getStepInkProgress(overshootingStep, overshootingStep.endMs) === 1,
+    'a normalized handoff preserves full ink coverage for the outgoing letter'
+  )
+  assert(
+    overshootingPair.steps[1].transition?.startPoint.x === 100,
+    'the next body handoff starts at its own first point after normalization'
+  )
+
   const detached = setupEngine('أبجد', {
     allowUnverifiedFallback: true,
     connectGlyphs: true
@@ -86,8 +167,147 @@ async function run(): Promise<void> {
   const detachedBodies = bodySteps(detached)
   assert(detachedBodies[1].transition?.kind === 'lift', 'non-joining boundary remains lifted')
 
+  const nonJoiningBoundary = setupEngine('دق', {
+    allowUnverifiedFallback: true,
+    connectGlyphs: true
+  })
+  const nonJoiningBodies = bodySteps(nonJoiningBoundary)
+  const isolatedQaf = nonJoiningBoundary.glyphs.find(
+    (glyph) => glyph.baseChar === 'ق' && glyph.semanticRole === 'base'
+  )
+  assert(
+    isolatedQaf?.glyphName === 'uni066F',
+    'qaf remains bare when the previous letter cannot join'
+  )
+  assert(
+    isolatedQaf?.definition?.id === 'canonical_contextual_ق_isolated',
+    'isolated qaf in a word uses a canonical body-only definition'
+  )
+  assert(
+    nonJoiningBodies[1]?.transition?.kind !== 'bridge',
+    'a non-left-joining predecessor never creates a cursive bridge'
+  )
+
+  const isolatedBaaAfterBreak = setupEngine('دب', {
+    allowUnverifiedFallback: true,
+    connectGlyphs: true
+  }).glyphs.find((glyph) => glyph.baseChar === 'ب' && glyph.semanticRole === 'base')
+  assert(
+    isolatedBaaAfterBreak?.definition?.id === 'canonical_contextual_ب_isolated',
+    'a bare letter after a joining break uses its canonical isolated body'
+  )
+  assert(
+    isolatedBaaAfterBreak?.orderedStrokes.every(
+      (stroke) => !(stroke.isCandidateDot || stroke.type === 'dot')
+    ),
+    'the isolated body does not duplicate the separately shaped dot'
+  )
+
+  const dottedRegression = setupEngine('أبجد', {
+    allowUnverifiedFallback: true,
+    connectGlyphs: true
+  })
+  assert(
+    dottedRegression.glyphs
+      .filter((glyph) => glyph.semanticRole === 'dot')
+      .every((glyph) => !glyph.definition?.id.startsWith('canonical_contextual_')),
+    'shaped dots keep their dot definition and never resolve as duplicate letter bodies'
+  )
+
+  const initialAfterBreak = setupEngine('دبت', {
+    allowUnverifiedFallback: true,
+    connectGlyphs: true
+  })
+  const initialBaa = initialAfterBreak.glyphs.find(
+    (glyph) => glyph.baseChar === 'ب' && glyph.semanticRole === 'base'
+  )
+  assert(
+    initialBaa?.glyphName === 'uni066E.init',
+    'a letter after a joining break keeps its initial form'
+  )
+
   const firstDot = separated.timeline.steps.find((step) => step.isDot)
   assert(firstDot?.transition?.kind !== 'bridge', 'dots never participate in body bridges')
+
+  const longWord = setupEngine('عبدالله', {
+    allowUnverifiedFallback: true,
+    connectGlyphs: true
+  })
+  const sparseLiveScene = prepareRenderScene(longWord.glyphs, longWord.timeline, 'sparse-live', {
+    stageWidth: 800,
+    stageHeight: 380,
+    showBaseline: false,
+    strokeWeight: 80,
+    centerVertically: true,
+    stampSpacingScale: 3
+  })
+  const bodyBrushWidth = getBrushSquareGeometry(
+    sparseLiveScene.strokes.find((stroke) => !stroke.isDot)!,
+    0,
+    sparseLiveScene.strokeWeight
+  ).width
+  const bodyBrush = getBrushSquareGeometry(
+    sparseLiveScene.strokes.find((stroke) => !stroke.isDot)!,
+    0,
+    sparseLiveScene.strokeWeight
+  )
+  const dotBrush = getBrushSquareGeometry(
+    sparseLiveScene.strokes.find((stroke) => stroke.isDot)!,
+    0,
+    sparseLiveScene.strokeWeight
+  )
+  assert(
+    bodyBrush.width > 20 && bodyBrush.width < bodyBrush.height,
+    'body brush is wider but not oversized'
+  )
+  assert(
+    dotBrush.width / dotBrush.height === bodyBrush.width / bodyBrush.height,
+    'dot brush keeps the canonical width ratio'
+  )
+  assert(
+    sparseLiveScene.strokes
+      .filter((stroke) => !stroke.isDot)
+      .every((stroke) => stroke.spacing <= bodyBrushWidth),
+    'sparse live stamps never leave gaps wider than the brush coverage'
+  )
+  assert(
+    sparseLiveScene.connections.every((connection) => {
+      const sourceStep = [...longWord.timeline.steps]
+        .reverse()
+        .find((step) => step.glyphIndex === connection.fromGlyphIndex && !step.isDot)
+      return sourceStep?.endProgress === 1
+    }),
+    'a clipped handoff never uses the completed outgoing mask to reveal the next glyph'
+  )
+
+  assert(
+    sparseLiveScene.strokes.filter((stroke) => !stroke.isDot).every((stroke) => stroke.continuousMask),
+    'every body stroke uses a brush-progress mask with no post-draw outline fill'
+  )
+  const firstBodyStep = longWord.timeline.steps.find((step) => !step.isDot)
+  assert(firstBodyStep, 'long-word scene has a body stroke to verify progressive coverage')
+  const progressiveFrame = renderSvgFrame(
+    sparseLiveScene,
+    firstBodyStep.startMs + (firstBodyStep.endMs - firstBodyStep.startMs) / 2
+  )
+  assert(
+    progressiveFrame.includes('class="continuous-mask-path"'),
+    'body coverage follows the travelled brush path continuously'
+  )
+  assert(
+    !progressiveFrame.includes('glyph-completion-fill'),
+    'no completed outline is injected ahead of the brush path'
+  )
+
+  const tariq = setupEngine('طارق', {
+    allowUnverifiedFallback: true,
+    connectGlyphs: true
+  })
+  assert(tariq.skippedGlyphs.length === 0, 'طارق has no skipped glyphs')
+  assert(
+    tariq.glyphs.every((glyph) => glyph.definition?.provenance !== 'unverified_fallback'),
+    'طارق resolves the font bare uni066F final qaf without fallback geometry'
+  )
 
   const frame = renderSvg(
     connected.glyphs,

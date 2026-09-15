@@ -27,11 +27,14 @@ interface CachedLicense {
   expiresAt?: string | null
 }
 
+const PRODUCTION_LICENSE_API_URL = 'https://abjad-licences.vercel.app'
+const configuredLicenseApiUrl = process.env.LICENSE_API_URL?.trim()
 const licenseApiUrl = (
-  process.env.LICENSE_API_URL || 'https://abjad-licences.vercel.app'
+  app.isPackaged ? PRODUCTION_LICENSE_API_URL : configuredLicenseApiUrl || PRODUCTION_LICENSE_API_URL
 ).replace(/\/$/, '')
 const cachePath = () => join(app.getPath('userData'), 'license.dat')
 const devicePath = () => join(app.getPath('userData'), 'device.dat')
+let sessionLicense: LicenseStatus | null = null
 
 function storageIsUsable(): boolean {
   if (!safeStorage.isEncryptionAvailable()) return false
@@ -104,7 +107,15 @@ async function validateOnline(token: string): Promise<LicenseStatus> {
       }
     }
 
-    if (!response.ok || !body.authorized || !body.license?.type) {
+    const license = body.license
+    const licenseType = license?.type
+    if (
+      !response.ok ||
+      !body.authorized ||
+      !license ||
+      (licenseType !== 'trial_2h' && licenseType !== 'lifetime')
+    ) {
+      sessionLicense = null
       await clearCache()
       return {
         status:
@@ -117,20 +128,26 @@ async function validateOnline(token: string): Promise<LicenseStatus> {
       }
     }
 
+    const verifiedLicense = license!
+    const verifiedLicenseType = verifiedLicense.type as LicenseType
+
     await writeCache({
       token,
-      licenseType: body.license.type,
-      activatedAt: body.license.activatedAt,
-      expiresAt: body.license.expiresAt
+      licenseType: verifiedLicenseType,
+      activatedAt: verifiedLicense.activatedAt,
+      expiresAt: verifiedLicense.expiresAt
     })
 
-    return {
+    const status: LicenseStatus = {
       status: 'licensed',
-      licenseType: body.license.type,
-      expiresAt: body.license.expiresAt,
-      remainingSeconds: body.license.remainingSeconds
+      licenseType: verifiedLicenseType,
+      expiresAt: verifiedLicense.expiresAt,
+      remainingSeconds: verifiedLicense.remainingSeconds
     }
+    sessionLicense = status
+    return status
   } catch {
+    sessionLicense = null
     return { status: 'offline', message: 'online_validation_required' }
   } finally {
     clearTimeout(timeout)
@@ -139,6 +156,7 @@ async function validateOnline(token: string): Promise<LicenseStatus> {
 
 export async function getLicenseStatus(): Promise<LicenseStatus> {
   if (!storageIsUsable()) {
+    sessionLicense = null
     return {
       status: 'storage_unavailable',
       message: 'Enable the operating system keyring before using licensing.'
@@ -146,10 +164,19 @@ export async function getLicenseStatus(): Promise<LicenseStatus> {
   }
 
   const cached = await readCache()
-  if (!cached) return { status: 'required' }
+  if (!cached) {
+    sessionLicense = null
+    return { status: 'required' }
+  }
 
   if (cached.licenseType === 'lifetime') {
-    return { status: 'licensed', licenseType: 'lifetime', expiresAt: null, remainingSeconds: null }
+    sessionLicense = {
+      status: 'licensed',
+      licenseType: 'lifetime',
+      expiresAt: null,
+      remainingSeconds: null
+    }
+    return sessionLicense
   }
 
   // Trial keys deliberately revalidate online on every application launch.
@@ -158,7 +185,17 @@ export async function getLicenseStatus(): Promise<LicenseStatus> {
 
 export async function activateLicense(token: string): Promise<LicenseStatus> {
   if (!storageIsUsable()) return { status: 'storage_unavailable' }
+  if (typeof token !== 'string') return { status: 'required', message: 'token_required' }
   const normalizedToken = token.trim()
   if (!normalizedToken || normalizedToken.length > 200) return { status: 'required', message: 'token_required' }
   return validateOnline(normalizedToken)
+}
+
+export async function requireLicensed(): Promise<void> {
+  if (sessionLicense?.status === 'licensed') return
+
+  const status = await getLicenseStatus()
+  if (status.status !== 'licensed') {
+    throw new Error(`License required: ${status.status}`)
+  }
 }

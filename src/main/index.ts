@@ -7,7 +7,7 @@ import { spawn } from 'child_process'
 import { electronApp, optimizer, is } from '@electron-toolkit/utils'
 import bundledFfmpegPath from 'ffmpeg-static'
 import icon from '../../resources/icon.png?asset'
-import { activateLicense, getLicenseStatus } from './license'
+import { activateLicense, getLicenseStatus, requireLicensed } from './license'
 
 function resolveFfmpegPath(): string {
   if (app.isPackaged) {
@@ -39,7 +39,10 @@ function createWindow(): void {
     ...(process.platform === 'linux' ? { icon } : {}),
     webPreferences: {
       preload: join(__dirname, '../preload/index.js'),
-      sandbox: false
+      contextIsolation: true,
+      nodeIntegration: false,
+      sandbox: false,
+      webSecurity: true
     }
   })
 
@@ -165,6 +168,7 @@ function withTimeout<T>(promise: Promise<T>, timeoutMs: number, message: string)
 }
 
 ipcMain.handle('load-font', async () => {
+  await requireLicensed()
   const bundledFontPath = join(__dirname, '../renderer/fonts/NotoSansArabic-Regular.ttf')
   return await fs.readFile(bundledFontPath)
 })
@@ -253,6 +257,7 @@ function runFfmpeg(
 }
 
 ipcMain.handle('convert-media', async (event, request: MediaConversionRequest) => {
+  await requireLicensed()
   if (!request || !['gif', 'mp4'].includes(request.format)) {
     throw new Error('Unsupported media export format.')
   }
@@ -286,6 +291,7 @@ ipcMain.handle('convert-media', async (event, request: MediaConversionRequest) =
 })
 
 ipcMain.handle('select-export-directory', async () => {
+  await requireLicensed()
   const result = await dialog.showOpenDialog({
     title: 'اختيار مجلد التصدير',
     properties: ['openDirectory', 'createDirectory']
@@ -304,6 +310,7 @@ ipcMain.handle(
       format: MediaFormat
     }
   ) => {
+    await requireLicensed()
     if (!request?.directory || !request?.filename || !['gif', 'mp4'].includes(request.format)) {
       throw new Error('بيانات ملف التصدير غير صالحة.')
     }
@@ -394,6 +401,7 @@ function writeExportFrameToStream(
 }
 
 ipcMain.handle('start-export-stream', async (_event, request: ExportStreamRequest) => {
+  await requireLicensed()
   if (!request?.directory || !request?.filename || !['gif', 'mp4'].includes(request.format)) {
     throw new Error('بيانات تصدير غير صالحة.')
   }
@@ -586,6 +594,7 @@ ipcMain.handle('start-export-stream', async (_event, request: ExportStreamReques
 ipcMain.handle(
   'write-export-frame',
   async (_event, request: { exportId: string; frameData: ArrayBuffer | Uint8Array }) => {
+    await requireLicensed()
     const stream = activeExportStreams.get(request.exportId)
     if (!stream) throw new Error(`Active export stream not found: ${request.exportId}`)
     return writeExportFrameToStream(stream, request.frameData)
@@ -593,6 +602,7 @@ ipcMain.handle(
 )
 
 ipcMain.handle('finish-export-stream', async (_event, request: { exportId: string }) => {
+  await requireLicensed()
   const stream = activeExportStreams.get(request.exportId)
   if (!stream) throw new Error(`Active export stream not found: ${request.exportId}`)
 

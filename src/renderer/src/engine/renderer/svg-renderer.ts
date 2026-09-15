@@ -3,7 +3,8 @@ import {
   AnimationTimeline,
   AnimationStep,
   CONNECTION_THRESHOLD_UNITS,
-  getBridgeHandoffProgress
+  getBridgeHandoffProgress,
+  getStepInkProgress
 } from '../animation/animation-engine'
 import { StrokeItem } from '../data/stroke-registry'
 import { svgPathProperties } from 'svg-path-properties'
@@ -18,9 +19,10 @@ export const DEFAULT_STROKE_WEIGHT = 80
 const MIN_STROKE_WEIGHT = 50
 const MAX_STROKE_WEIGHT = 110
 export const GLOBAL_BRUSH_SCALE = 1
-const DEFAULT_BRUSH_WIDTH = 8
-const DEFAULT_BRUSH_HEIGHT = 80
-const DEFAULT_DOT_BRUSH_HEIGHT = 100
+/** Canonical brush dimensions in the editor's font-coordinate space. */
+export const DEFAULT_BRUSH_HEIGHT = 80
+export const DEFAULT_DOT_BRUSH_HEIGHT = 100
+export const BRUSH_WIDTH_TO_HEIGHT_RATIO = 0.3
 const MAX_BODY_TANGENT_WINDOW = 0.014
 const MAX_DOT_TANGENT_WINDOW = 0.08
 const BODY_TANGENT_WINDOW_UNITS = 9
@@ -46,7 +48,8 @@ export interface BrushProfile {
 function stampSpacing(
   profile: BrushProfile | undefined,
   isDot: boolean,
-  spacingScale: number = 1
+  spacingScale: number = 1,
+  strokeWeight: number = DEFAULT_STROKE_WEIGHT
 ): number {
   const spacing = profile?.stampSpacing
   const baseSpacing =
@@ -55,7 +58,17 @@ function stampSpacing(
       : isDot
         ? DEFAULT_DOT_STAMP_SPACING
         : DEFAULT_BODY_STAMP_SPACING
-  return baseSpacing * Math.max(1, spacingScale)
+  const requestedSpacing = baseSpacing * Math.max(1, spacingScale)
+
+  // A live board may request sparse stamps to reduce DOM work. Never let that
+  // optimization exceed the narrow side of the brush, otherwise horizontal
+  // portions of a path expose gaps between neighboring rectangles.
+  const brushHeight =
+    (isDot ? DEFAULT_DOT_BRUSH_HEIGHT : DEFAULT_BRUSH_HEIGHT) *
+    Math.max(0.25, strokeWeight / DEFAULT_STROKE_WEIGHT)
+  const brushWidth = brushHeight * BRUSH_WIDTH_TO_HEIGHT_RATIO
+  const maxCoveredSpacing = brushWidth * 0.75
+  return Math.min(requestedSpacing, maxCoveredSpacing)
 }
 
 function tangentWindow(profile: BrushProfile | undefined, isDot: boolean, length: number): number {
@@ -372,8 +385,11 @@ export function computeViewportTransform(
     const gy = glyph.glyphY
 
     // 1. Incorporate rendered glyph outline bounds (in SVG coordinates)
-    const outline = glyph.definition?.outlinePath
-    if (outline) {
+    const outlinePaths = [
+      glyph.definition?.outlinePath,
+      ...(glyph.definition?.outlinePaths || [])
+    ].filter((path): path is string => Boolean(path))
+    for (const outline of outlinePaths) {
       const b = getPathBounds(outline)
       if (b) {
         if (b.minX + gx < minX) minX = b.minX + gx
@@ -598,7 +614,13 @@ export interface BrushGeometry {
   height: number
 }
 
-/** Shared narrow brush geometry for Canvas and SVG renderers. */
+/**
+ * Shared brush geometry for Canvas and SVG renderers.
+ *
+ * Dimensions stay in the editor's canonical font units. The surrounding
+ * word-group applies the viewport scale calculated from the actual board and
+ * glyph bounds, so the brush remains proportional on every responsive size.
+ */
 export function getBrushSquareGeometry(
   stroke: Pick<PreparedStroke, 'brushProfile' | 'isDot'>,
   progress: number,
@@ -606,9 +628,10 @@ export function getBrushSquareGeometry(
 ): BrushGeometry {
   void progress
   const scale = Math.max(0.25, strokeWeight / DEFAULT_STROKE_WEIGHT)
+  const height = (stroke.isDot ? DEFAULT_DOT_BRUSH_HEIGHT : DEFAULT_BRUSH_HEIGHT) * scale
   return {
-    width: DEFAULT_BRUSH_WIDTH * scale,
-    height: (stroke.isDot ? DEFAULT_DOT_BRUSH_HEIGHT : DEFAULT_BRUSH_HEIGHT) * scale
+    width: height * BRUSH_WIDTH_TO_HEIGHT_RATIO,
+    height
   }
 }
 
@@ -712,7 +735,8 @@ export function prepareRenderScene(
     for (let sIdx = 0; sIdx < rawStrokes.length; sIdx++) {
       const stroke = rawStrokes[sIdx]
       const strokeOrder = stroke.order ?? sIdx
-      const isDot = stroke.isCandidateDot ?? (stroke.type === 'dot' || glyph.semanticRole === 'dot')
+      const isDot =
+        stroke.isCandidateDot === true || stroke.type === 'dot' || glyph.semanticRole === 'dot'
 
       if (stroke.medianPath) {
         medianPaths.push(stroke.medianPath)
@@ -725,8 +749,11 @@ export function prepareRenderScene(
       const pathProps = new svgPathProperties(stroke.medianPath)
       const length = pathProps.getTotalLength()
       const brushProfile = (stroke as { brushProfile?: BrushProfile }).brushProfile
-      const continuousMask = !isDot && brushProfile?.continuousMask === 1
-      const spacing = stampSpacing(brushProfile, isDot, options?.stampSpacingScale)
+      // A continuous path mask complements sparse stamps without revealing
+      // anything ahead of the moving brush. It avoids stamp-spacing seams for
+      // every body stroke, including user-authored paths without a profile.
+      const continuousMask = !isDot
+      const spacing = stampSpacing(brushProfile, isDot, options?.stampSpacingScale, strokeWeight)
       const fixedCount = Math.floor(length / spacing)
       const samples = new Float32Array((fixedCount + 1) * 4)
 
@@ -834,9 +861,7 @@ export function prepareRenderScene(
     if (composed[gIdx + 1].glyphId === 15) continue // Skip final ب
     const glyph = composed[gIdx]
     const nextGlyph = composed[gIdx + 1]
-    const nextBodyStep = timeline?.steps.find(
-      (step) => step.glyphIndex === gIdx + 1 && !step.isDot
-    )
+    const nextBodyStep = timeline?.steps.find((step) => step.glyphIndex === gIdx + 1 && !step.isDot)
 
     // The animation timeline owns the join decision. Do not pre-reveal a
     // neighboring outline in separated-stroke mode or during a lifted move.
@@ -844,21 +869,28 @@ export function prepareRenderScene(
 
     const rawStrokes = glyph.orderedStrokes || glyph.definition?.strokes || []
     const bodyStrokes = rawStrokes.filter(
-      (s) => !(s.isCandidateDot ?? (s.type === 'dot' || glyph.semanticRole === 'dot'))
+      (s) => !(s.isCandidateDot === true || s.type === 'dot' || glyph.semanticRole === 'dot')
     )
     const connectingStroke =
       bodyStrokes.length > 0
         ? bodyStrokes[bodyStrokes.length - 1]
         : rawStrokes[rawStrokes.length - 1]
-    const nextStrokes = nextGlyph.orderedStrokes || nextGlyph.definition?.strokes || []
-    const nextFirstStroke = nextStrokes[0]
+    const nextFirstStroke = nextBodyStep.stroke
 
     if (connectingStroke && nextFirstStroke) {
-      let endPt = connectingStroke.endPoint
+      const connectingStep = timeline?.steps.find(
+        (step) => step.glyphIndex === gIdx && step.stroke.order === connectingStroke.order
+      )
+      const endProgress = connectingStep?.endProgress ?? 1
+      // A clipped terminal path is used only to hand the cursor to the next
+      // stroke. Its outgoing ink now completes against its own outline, so it
+      // must not also mask-reveal the next glyph beyond that handoff point.
+      if (endProgress < 1) continue
+      let endPt = endProgress < 1 ? undefined : connectingStroke.endPoint
       if (!endPt && connectingStroke.medianPath) {
         try {
           const p = new svgPathProperties(connectingStroke.medianPath)
-          endPt = p.getPointAtLength(p.getTotalLength())
+          endPt = p.getPointAtLength(p.getTotalLength() * endProgress)
         } catch {
           // ignore
         }
@@ -946,10 +978,7 @@ export function renderSvgFrame(scene: PreparedRenderScene, progressMs: number = 
   for (const stroke of scene.strokes) {
     let progress = 0
     if (stroke.step) {
-      const duration = stroke.step.endMs - stroke.step.startMs
-      const t = progressMs - stroke.step.startMs
-      const linearT = clamp(duration > 0 ? t / duration : 0)
-      progress = linearT * linearT * (3 - 2 * linearT)
+      progress = getStepInkProgress(stroke.step, progressMs)
     } else if (progressMs > 0) {
       progress = 1
     }
@@ -1013,7 +1042,7 @@ export function renderSvgFrame(scene: PreparedRenderScene, progressMs: number = 
     if (stroke.continuousMask && progress > 0) {
       const { height: brushHeight } = getBrushSquareGeometry(stroke, progress, strokeWeight)
       const dashLength = Math.max(length * progress, 0.001)
-      fragments += `<path d="${stroke.medianPath}" fill="none" stroke="#fff" stroke-width="${fmtNum(brushHeight)}" stroke-linecap="butt" stroke-linejoin="round" stroke-dasharray="${dashLength} ${Math.max(length - dashLength, 0.001)}"></path>`
+      fragments += `<path class="continuous-mask-path" d="${stroke.medianPath}" fill="none" stroke="#fff" stroke-width="${fmtNum(brushHeight)}" stroke-linecap="butt" stroke-linejoin="round" stroke-dasharray="${dashLength} ${Math.max(length - dashLength, 0.001)}"></path>`
     }
 
     defsContent += `
@@ -1078,7 +1107,7 @@ export function renderSvgFrame(scene: PreparedRenderScene, progressMs: number = 
   }
 
   const { scale, baselineY, tx } = scene.viewport
-  return `<svg id="writing-stage" width="100%" height="100%" viewBox="0 0 ${scene.stageWidth} ${scene.stageHeight}" role="img">
+  return `<svg id="writing-stage" width="100%" height="100%" viewBox="0 0 ${scene.stageWidth} ${scene.stageHeight}" preserveAspectRatio="xMidYMid meet" role="img">
         <defs>
           ${scene.strokeWeightFilter}
           ${scene.defsOutlinesMarkup}

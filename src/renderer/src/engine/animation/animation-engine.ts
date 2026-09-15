@@ -4,11 +4,12 @@ import { svgPathProperties } from 'svg-path-properties'
 
 const RAA_REFERENCE_INK_UNITS_PER_MS = 0.177012621
 
-function inkDurationMs(stroke: Stroke): number {
+function inkDurationMs(stroke: Stroke, endProgress: number = 1): number {
   if (!stroke.medianPath) return 1200
   const props = new svgPathProperties(stroke.medianPath)
   const length = props.getTotalLength()
-  return length > 0 ? length / RAA_REFERENCE_INK_UNITS_PER_MS : 1200
+  const visibleLength = length * Math.max(0, Math.min(1, endProgress))
+  return visibleLength > 0 ? visibleLength / RAA_REFERENCE_INK_UNITS_PER_MS : 1200
 }
 
 export type AnimationMode = 'idle' | 'play' | 'step' | 'repeat-step' | 'auto-repeat'
@@ -39,6 +40,8 @@ export interface AnimationStep {
   glyphIndex: number
   stroke: Stroke
   isDot: boolean
+  /** Terminal fraction of the authored path to reveal before a normalized handoff. */
+  endProgress: number
   /** Movement before this authored stroke. It is not an educational step. */
   transition?: CursorTransition
 }
@@ -60,13 +63,21 @@ export const MIN_BRIDGE_TANGENT_ALIGNMENT = 0.25
 export const MIN_BRIDGE_FORWARD_PROJECTION = 0.15
 /** Small initial brush exposure used while the cursor crosses a bridge. */
 export const BRIDGE_HANDOFF_PROGRESS = 0.0001
+const MIN_HANDOFF_PROGRESS = 0.55
+const MAX_HANDOFF_DISTANCE_UNITS = 36
+const MIN_HANDOFF_BACKTRACK_UNITS = 2
+const HANDOFF_SEARCH_SAMPLES = 64
 
 interface StrokePointData {
   point: { x: number; y: number }
   tangent: { x: number; y: number }
 }
 
-function getStrokePointData(stroke: Stroke, atEnd: boolean): StrokePointData | null {
+function getStrokePointData(
+  stroke: Stroke,
+  atEnd: boolean,
+  endProgress: number = 1
+): StrokePointData | null {
   if (!stroke?.medianPath) return null
 
   try {
@@ -74,10 +85,11 @@ function getStrokePointData(stroke: Stroke, atEnd: boolean): StrokePointData | n
     const length = props.getTotalLength()
     if (!length) return null
 
-    const pointLength = atEnd ? length : 0
+    const terminalLength = length * Math.max(0, Math.min(1, endProgress))
+    const pointLength = atEnd ? terminalLength : 0
     const tangentWindow = Math.min(12, Math.max(2, length * 0.02))
     const beforeLength = Math.max(0, pointLength - tangentWindow)
-    const afterLength = Math.min(length, pointLength + tangentWindow)
+    const afterLength = Math.min(terminalLength, pointLength + tangentWindow)
     const before = props.getPointAtLength(beforeLength)
     const after = props.getPointAtLength(afterLength)
     const dx = after.x - before.x
@@ -96,9 +108,10 @@ function getStrokePointData(stroke: Stroke, atEnd: boolean): StrokePointData | n
 function getWorldStrokePoint(
   glyph: ComposedGlyph,
   stroke: Stroke,
-  atEnd: boolean
+  atEnd: boolean,
+  endProgress: number = 1
 ): StrokePointData | null {
-  const local = getStrokePointData(stroke, atEnd)
+  const local = getStrokePointData(stroke, atEnd, endProgress)
   if (!local) return null
   return {
     point: {
@@ -106,6 +119,74 @@ function getWorldStrokePoint(
       y: (glyph.glyphY || 0) + local.point.y
     },
     tangent: local.tangent
+  }
+}
+
+function isDotStroke(
+  stroke: { isCandidateDot?: boolean; type?: string },
+  glyph: ComposedGlyph
+): boolean {
+  return stroke.isCandidateDot === true || stroke.type === 'dot' || glyph.semanticRole === 'dot'
+}
+
+function findNextBaseBodyStroke(
+  composed: ComposedGlyph[],
+  glyphIndex: number
+): { glyph: ComposedGlyph; stroke: ComposedGlyph['orderedStrokes'][number] } | null {
+  for (let index = glyphIndex + 1; index < composed.length; index += 1) {
+    const glyph = composed[index]
+    if (glyph.semanticRole !== 'base') continue
+    const stroke = glyph.orderedStrokes.find((candidate) => !isDotStroke(candidate, glyph))
+    if (stroke) return { glyph, stroke }
+  }
+  return null
+}
+
+function getNormalizedHandoffProgress(
+  glyph: ComposedGlyph,
+  stroke: ComposedGlyph['orderedStrokes'][number],
+  nextGlyph: ComposedGlyph,
+  nextStroke: ComposedGlyph['orderedStrokes'][number]
+): number | null {
+  if (!stroke.medianPath || !nextStroke.medianPath) return null
+
+  const fullEnd = getWorldStrokePoint(glyph, stroke as unknown as Stroke, true)
+  const nextStart = getWorldStrokePoint(nextGlyph, nextStroke as unknown as Stroke, false)
+  if (!fullEnd || !nextStart) return null
+
+  const remainingVector = {
+    x: nextStart.point.x - fullEnd.point.x,
+    y: nextStart.point.y - fullEnd.point.y
+  }
+  if (dot(fullEnd.tangent, remainingVector) >= -MIN_HANDOFF_BACKTRACK_UNITS) return null
+
+  try {
+    const path = new svgPathProperties(stroke.medianPath)
+    const length = path.getTotalLength()
+    if (!length) return null
+
+    let nearestProgress = 1
+    let nearestDistanceSquared = Infinity
+    for (let index = 0; index <= HANDOFF_SEARCH_SAMPLES; index += 1) {
+      const progress =
+        MIN_HANDOFF_PROGRESS + ((1 - MIN_HANDOFF_PROGRESS) * index) / HANDOFF_SEARCH_SAMPLES
+      const point = path.getPointAtLength(length * progress)
+      const dx = glyph.glyphX + point.x - nextStart.point.x
+      const dy = glyph.glyphY + point.y - nextStart.point.y
+      const distanceSquared = dx * dx + dy * dy
+      if (distanceSquared < nearestDistanceSquared) {
+        nearestProgress = progress
+        nearestDistanceSquared = distanceSquared
+      }
+    }
+
+    if (nearestProgress >= 0.99 || nearestDistanceSquared > MAX_HANDOFF_DISTANCE_UNITS ** 2) {
+      return null
+    }
+
+    return nearestProgress
+  } catch {
+    return null
   }
 }
 
@@ -193,6 +274,18 @@ export function getInterGlyphDistance(
   return Math.hypot(end.point.x - start.point.x, end.point.y - start.point.y)
 }
 
+function hasFormSuffix(glyphName: string, suffix: 'init' | 'medi' | 'fina'): boolean {
+  return new RegExp(`\\.${suffix}(?:\\.|$)`).test(glyphName)
+}
+
+function canConnectToNext(glyph: ComposedGlyph): boolean {
+  return hasFormSuffix(glyph.glyphName, 'init') || hasFormSuffix(glyph.glyphName, 'medi')
+}
+
+function canConnectFromPrevious(glyph: ComposedGlyph): boolean {
+  return hasFormSuffix(glyph.glyphName, 'fina') || hasFormSuffix(glyph.glyphName, 'medi')
+}
+
 export function smoothProgress(t: number): number {
   const c = Math.max(0, Math.min(1, t))
   return c * c * (3 - 2 * c)
@@ -217,32 +310,73 @@ export function getBridgeHandoffProgress(
   return BRIDGE_HANDOFF_PROGRESS
 }
 
+export function getStepStrokeProgress(step: AnimationStep, progressMs: number): number {
+  const duration = step.endMs - step.startMs
+  const linearProgress = Math.max(
+    0,
+    Math.min(1, duration > 0 ? (progressMs - step.startMs) / duration : 0)
+  )
+  return smoothProgress(linearProgress) * step.endProgress
+}
+
+/**
+ * Mask coverage always completes the authored stroke. `endProgress` only
+ * controls the pen's terminal handoff point, so a normalized cursor cannot
+ * carve a gap out of the outgoing glyph outline.
+ */
+export function getStepInkProgress(step: AnimationStep, progressMs: number): number {
+  const duration = step.endMs - step.startMs
+  const linearProgress = Math.max(
+    0,
+    Math.min(1, duration > 0 ? (progressMs - step.startMs) / duration : 0)
+  )
+  return smoothProgress(linearProgress)
+}
+
 export function buildTimeline(
   composed: ComposedGlyph[],
   options: TimelineOptions = {}
 ): AnimationTimeline {
   const steps: AnimationStep[] = []
   let currentTimeMs = 0
+  let previousBodyStep: AnimationStep | undefined
 
   for (let i = 0; i < composed.length; i++) {
     const glyph = composed[i]
 
     for (const stroke of glyph.orderedStrokes || []) {
-      const isDot = stroke.isCandidateDot ?? (stroke.type === 'dot' || glyph.semanticRole === 'dot')
-      const durationMs = inkDurationMs(stroke as unknown as Stroke)
+      const isDot = isDotStroke(stroke, glyph)
+      const bodyStrokes = glyph.orderedStrokes.filter((candidate) => !isDotStroke(candidate, glyph))
+      const isTerminalBodyStroke = !isDot && bodyStrokes[bodyStrokes.length - 1] === stroke
+      const nextBody = isTerminalBodyStroke ? findNextBaseBodyStroke(composed, i) : null
+      const endProgress =
+        nextBody && canConnectToNext(glyph) && canConnectFromPrevious(nextBody.glyph)
+          ? (getNormalizedHandoffProgress(glyph, stroke, nextBody.glyph, nextBody.stroke) ?? 1)
+          : 1
+      const durationMs = inkDurationMs(stroke as unknown as Stroke, endProgress)
 
       // When crossing a glyph boundary, calculate physical distance and create
       // either a short cursive bridge or a lifted travel transition.
       const previousStep = steps[steps.length - 1]
-      const crossesGlyphBoundary = previousStep && previousStep.glyphIndex !== i
+      // Dots are intentionally animated between the current letter and the
+      // next one. A following body must still use the previous body as its
+      // connection anchor; comparing against the dot would turn every dotted
+      // word boundary into a lifted move.
+      const boundaryStep = isDot ? previousStep : previousBodyStep
+      const crossesGlyphBoundary = boundaryStep && boundaryStep.glyphIndex !== i
 
       let transition: CursorTransition | undefined
 
       if (crossesGlyphBoundary) {
-        const prevGlyph = composed[previousStep.glyphIndex]
-        const previousStroke = previousStep.stroke
+        const prevGlyph = composed[boundaryStep.glyphIndex]
+        const previousStroke = boundaryStep.stroke
         const currentStroke = stroke as unknown as Stroke
-        const previousEnd = getWorldStrokePoint(prevGlyph, previousStroke, true)
+        const previousEnd = getWorldStrokePoint(
+          prevGlyph,
+          previousStroke,
+          true,
+          boundaryStep.endProgress
+        )
         const currentStart = getWorldStrokePoint(glyph, currentStroke, false)
         const dist =
           previousEnd && currentStart
@@ -253,11 +387,20 @@ export function buildTimeline(
             : null
 
         if (dist !== null && previousEnd && currentStart) {
+          // A normalized terminal path has already reached the incoming
+          // stroke's start vicinity. Snap the cursor endpoint to that exact
+          // authored start so no fractional sampling gap remains at handoff.
+          if (boundaryStep.endProgress < 1) {
+            previousEnd.point = { ...currentStart.point }
+          }
           const isBodyBoundary =
-            !previousStep.isDot &&
+            !boundaryStep.isDot &&
             !isDot &&
             prevGlyph.semanticRole === 'base' &&
             glyph.semanticRole === 'base'
+
+          const isShapedConnection =
+            isBodyBoundary && canConnectToNext(prevGlyph) && canConnectFromPrevious(glyph)
 
           const bridgeDirections = getBridgeDirections(previousEnd, currentStart)
           const canUseDirectionalBridge =
@@ -265,7 +408,7 @@ export function buildTimeline(
 
           if (
             options.connectGlyphs &&
-            isBodyBoundary &&
+            isShapedConnection &&
             dist < CONNECTION_THRESHOLD_UNITS &&
             canUseDirectionalBridge
           ) {
@@ -322,14 +465,15 @@ export function buildTimeline(
         glyphIndex: i,
         stroke: stroke as unknown as Stroke,
         isDot,
+        endProgress,
         transition,
         // A connected handoff is an overlap, not a blank interval. Start the
         // next stroke when the bridge starts so its ink advances while the
         // cursor travels to the next glyph.
         startMs: transition?.kind === 'bridge' ? transition.startMs : currentTimeMs,
-        endMs:
-          (transition?.kind === 'bridge' ? transition.startMs : currentTimeMs) + durationMs
+        endMs: (transition?.kind === 'bridge' ? transition.startMs : currentTimeMs) + durationMs
       })
+      if (!isDot) previousBodyStep = steps[steps.length - 1]
       currentTimeMs = Math.max(
         currentTimeMs,
         (transition?.kind === 'bridge' ? transition.startMs : currentTimeMs) + durationMs
